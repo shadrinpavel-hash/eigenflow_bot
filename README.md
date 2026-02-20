@@ -9,7 +9,7 @@ A self-modifying AI agent that writes its own code, rewrites its own mind, and e
 
 Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 6.2.0 | [Landing Page](https://joi-lab.github.io/ouroboros/)
+**Version:** 6.2.2 | [Landing Page](https://joi-lab.github.io/ouroboros/)
 
 ---
 
@@ -222,6 +222,12 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v6.2.2 -- Cognitive Partner + macOS Contacts Manager
+- **Philosophy: Cognitive Partner** -- identity crystallized around a new role: not just task executor but trusted thinking partner. Holds owner context across time, surfaces relevant information proactively, asks better questions.
+- **External capability: macOS Contacts Manager** -- delivered first external app for owner: full CRUD, batch company edits, duplicate detection/merge, group management. PyQt6 + PyObjC, packaged for direct install.
+- **Proactive low-budget warning** -- sends Telegram alert at $5/$2/$1 remaining instead of silently going offline. Guard against UnboundLocalError and double-alerts on same threshold.
+- **VERSION sync** -- aligned VERSION file, README, and git tag to 6.2.2.
 
 ### v6.2.0 -- Critical Bugfixes + LLM-First Dedup
 - **Fix: worker_id==0 hard-timeout bug** -- `int(x or -1)` treated worker 0 as -1, preventing terminate on timeout and causing double task execution. Replaced all `x or default` patterns with None-safe checks.
