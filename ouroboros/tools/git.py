@@ -1,4 +1,4 @@
-"""Git tools: repo_write_commit, repo_commit_push, git_status, git_diff."""
+"""Git tools: git_clone, repo_write_commit, repo_commit_push, git_status, git_diff."""
 
 from __future__ import annotations
 
@@ -7,12 +7,33 @@ import os
 import pathlib
 import subprocess
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import utc_now_iso, write_text, safe_relpath, run_cmd
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# CWD resolution helper
+# ---------------------------------------------------------------------------
+
+def _resolve_cwd(ctx: ToolContext, cwd: str) -> Tuple[pathlib.Path, bool]:
+    """Resolve the effective working directory.
+
+    Returns (effective_dir, is_external):
+      - is_external=True  → absolute path outside the ouroboros repo (no lock, no branch checkout)
+      - is_external=False → within the ouroboros repo (use lock + branch checkout)
+    """
+    if cwd and cwd.strip() not in ("", ".", "./"):
+        p = pathlib.Path(cwd)
+        if p.is_absolute():
+            return p, True          # external repo — caller must ensure it exists
+        # relative path: treat as sub-path of the ouroboros repo
+        candidate = (ctx.repo_dir / cwd).resolve()
+        return candidate, False
+    return ctx.repo_dir, False
 
 
 # --- Git lock ---
@@ -119,12 +140,76 @@ def _git_push_with_tests(ctx: ToolContext) -> Optional[str]:
     return None
 
 
-# --- Tool implementations ---
+# ---------------------------------------------------------------------------
+# git_clone
+# ---------------------------------------------------------------------------
 
-def _repo_write_commit(ctx: ToolContext, path: str, content: str, commit_message: str) -> str:
+def _git_clone(ctx: ToolContext, url: str, dest: str, branch: str = "") -> str:
+    """Clone an external git repository to a local path.
+
+    Idempotent: if ``dest`` already contains a git repo, runs ``git pull`` instead.
+    """
+    dest_path = pathlib.Path(dest)
+    # If already a git repo → pull latest
+    if (dest_path / ".git").exists():
+        try:
+            out = run_cmd(["git", "pull"], cwd=dest_path)
+            return f"OK: repo already cloned at {dest}, pulled latest.\n{out}"
+        except Exception as e:
+            return f"⚠️ GIT_ERROR (pull in existing clone): {e}"
+
+    dest_path.mkdir(parents=True, exist_ok=True)
+    cmd = ["git", "clone", url, str(dest_path)]
+    if branch:
+        cmd += ["--branch", branch]
+    try:
+        out = run_cmd(cmd)
+        return f"OK: cloned {url} → {dest}\n{out}"
+    except Exception as e:
+        return f"⚠️ GIT_ERROR (clone): {e}"
+
+
+# ---------------------------------------------------------------------------
+# Tool implementations
+# ---------------------------------------------------------------------------
+
+def _repo_write_commit(
+    ctx: ToolContext,
+    path: str,
+    content: str,
+    commit_message: str,
+    cwd: str = "",
+) -> str:
+    effective_dir, is_external = _resolve_cwd(ctx, cwd)
     ctx.last_push_succeeded = False
+
     if not commit_message.strip():
         return "⚠️ ERROR: commit_message must be non-empty."
+
+    if is_external:
+        # External repo: no git lock, no branch checkout
+        try:
+            file_path = effective_dir / path
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(content, encoding="utf-8")
+        except Exception as e:
+            return f"⚠️ FILE_WRITE_ERROR: {e}"
+        try:
+            run_cmd(["git", "add", path], cwd=effective_dir)
+        except Exception as e:
+            return f"⚠️ GIT_ERROR (add): {e}"
+        try:
+            run_cmd(["git", "commit", "-m", commit_message], cwd=effective_dir)
+        except Exception as e:
+            return f"⚠️ GIT_ERROR (commit): {e}"
+        try:
+            run_cmd(["git", "push"], cwd=effective_dir)
+        except Exception as e:
+            return f"⚠️ GIT_ERROR (push): {e}"
+        ctx.last_push_succeeded = True
+        return f"OK: committed and pushed {path} in {effective_dir}: {commit_message}"
+
+    # Own repo: original locking behaviour
     lock = _acquire_git_lock(ctx)
     try:
         try:
@@ -153,10 +238,46 @@ def _repo_write_commit(ctx: ToolContext, path: str, content: str, commit_message
     return f"OK: committed and pushed to {ctx.branch_dev}: {commit_message}"
 
 
-def _repo_commit_push(ctx: ToolContext, commit_message: str, paths: Optional[List[str]] = None) -> str:
+def _repo_commit_push(
+    ctx: ToolContext,
+    commit_message: str,
+    paths: Optional[List[str]] = None,
+    cwd: str = "",
+) -> str:
+    effective_dir, is_external = _resolve_cwd(ctx, cwd)
     ctx.last_push_succeeded = False
+
     if not commit_message.strip():
         return "⚠️ ERROR: commit_message must be non-empty."
+
+    if is_external:
+        # External repo: no git lock, no branch checkout
+        if paths:
+            add_cmd = ["git", "add"] + [str(p) for p in paths if str(p).strip()]
+        else:
+            add_cmd = ["git", "add", "-A"]
+        try:
+            run_cmd(add_cmd, cwd=effective_dir)
+        except Exception as e:
+            return f"⚠️ GIT_ERROR (add): {e}"
+        try:
+            status = run_cmd(["git", "status", "--porcelain"], cwd=effective_dir)
+        except Exception as e:
+            return f"⚠️ GIT_ERROR (status): {e}"
+        if not status.strip():
+            return "⚠️ GIT_NO_CHANGES: nothing to commit."
+        try:
+            run_cmd(["git", "commit", "-m", commit_message], cwd=effective_dir)
+        except Exception as e:
+            return f"⚠️ GIT_ERROR (commit): {e}"
+        try:
+            run_cmd(["git", "push"], cwd=effective_dir)
+        except Exception as e:
+            return f"⚠️ GIT_ERROR (push): {e}"
+        ctx.last_push_succeeded = True
+        return f"OK: committed and pushed in {effective_dir}: {commit_message}"
+
+    # Own repo: original locking behaviour
     lock = _acquire_git_lock(ctx)
     try:
         try:
@@ -205,25 +326,50 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str, paths: Optional[Lis
     return result
 
 
-def _git_status(ctx: ToolContext) -> str:
+def _git_status(ctx: ToolContext, cwd: str = "") -> str:
+    effective_dir, _ = _resolve_cwd(ctx, cwd)
     try:
-        return run_cmd(["git", "status", "--porcelain"], cwd=ctx.repo_dir)
+        return run_cmd(["git", "status", "--porcelain"], cwd=effective_dir)
     except Exception as e:
         return f"⚠️ GIT_ERROR: {e}"
 
 
-def _git_diff(ctx: ToolContext, staged: bool = False) -> str:
+def _git_diff(ctx: ToolContext, staged: bool = False, cwd: str = "") -> str:
+    effective_dir, _ = _resolve_cwd(ctx, cwd)
     try:
         cmd = ["git", "diff"]
         if staged:
             cmd.append("--staged")
-        return run_cmd(cmd, cwd=ctx.repo_dir)
+        return run_cmd(cmd, cwd=effective_dir)
     except Exception as e:
         return f"⚠️ GIT_ERROR: {e}"
 
 
 def get_tools() -> List[ToolEntry]:
+    _cwd_param = {
+        "cwd": {
+            "type": "string",
+            "default": "",
+            "description": (
+                "Optional working directory. Use absolute path for external repos "
+                "(e.g. /content/olumina_repo). Default: ouroboros repo."
+            ),
+        }
+    }
+
     return [
+        ToolEntry("git_clone", {
+            "name": "git_clone",
+            "description": (
+                "Clone an external git repository to a local path. "
+                "Use before working on user projects. Idempotent: pulls latest if already cloned."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "url": {"type": "string", "description": "Repository URL (HTTPS or SSH)"},
+                "dest": {"type": "string", "description": "Absolute local path, e.g. /content/olumina_repo"},
+                "branch": {"type": "string", "default": "", "description": "Optional branch name"},
+            }, "required": ["url", "dest"]},
+        }, _git_clone, is_code_tool=True),
         ToolEntry("repo_write_commit", {
             "name": "repo_write_commit",
             "description": "Write one file + commit + push to ouroboros branch. For small deterministic edits.",
@@ -231,6 +377,7 @@ def get_tools() -> List[ToolEntry]:
                 "path": {"type": "string"},
                 "content": {"type": "string"},
                 "commit_message": {"type": "string"},
+                **_cwd_param,
             }, "required": ["path", "content", "commit_message"]},
         }, _repo_write_commit, is_code_tool=True),
         ToolEntry("repo_commit_push", {
@@ -239,18 +386,20 @@ def get_tools() -> List[ToolEntry]:
             "parameters": {"type": "object", "properties": {
                 "commit_message": {"type": "string"},
                 "paths": {"type": "array", "items": {"type": "string"}, "description": "Files to add (empty = git add -A)"},
+                **_cwd_param,
             }, "required": ["commit_message"]},
         }, _repo_commit_push, is_code_tool=True),
         ToolEntry("git_status", {
             "name": "git_status",
             "description": "git status --porcelain",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {"type": "object", "properties": {**_cwd_param}, "required": []},
         }, _git_status, is_code_tool=True),
         ToolEntry("git_diff", {
             "name": "git_diff",
             "description": "git diff (use staged=true to see staged changes after git add)",
             "parameters": {"type": "object", "properties": {
                 "staged": {"type": "boolean", "default": False, "description": "If true, show staged changes (--staged)"},
+                **_cwd_param,
             }, "required": []},
         }, _git_diff, is_code_tool=True),
     ]
