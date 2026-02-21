@@ -81,11 +81,16 @@ class BackgroundConsciousness:
     @property
     def _model(self) -> str:
         model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
-        # Safety: never use expensive pro models for background consciousness
         model_lower = model.lower()
-        if ("gemini-3" in model_lower or
-                ("gemini" in model_lower and "pro" in model_lower and "flash" not in model_lower)):
-            log.info("Background model '%s' is expensive, overriding to gemini-2.0-flash-001", model)
+        # Never use expensive models for background consciousness
+        expensive_patterns = [
+            "claude", "sonnet", "opus", "gpt-4", "o1", "o3",
+            "gemini-2.5-pro", "gemini-3", "gemini-pro"
+        ]
+        is_cheap = any(p in model_lower for p in ["flash", "mini", "haiku", "lite"])
+        is_expensive = any(p in model_lower for p in expensive_patterns)
+        if is_expensive and not is_cheap:
+            log.warning("Background model '%s' is expensive, overriding to gemini-2.0-flash-001", model)
             return "google/gemini-2.0-flash-001"
         return model
 
