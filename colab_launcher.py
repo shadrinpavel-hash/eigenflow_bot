@@ -597,9 +597,6 @@ while True:
         if not text and not image_data:
             continue  # empty message, skip
 
-        # Feed observation to consciousness
-        _consciousness.inject_observation(f"Owner message: {text[:100]}")
-
         agent = _get_chat_agent()
 
         if agent._busy:
@@ -689,6 +686,8 @@ while True:
             else:
                 # Dispatch to direct chat handler
                 _consciousness.pause()
+                # Inject observation AFTER pause so consciousness defers it (no double-response)
+                _consciousness.inject_observation(f"Owner message: {final_text[:100]}")
                 def _run_task_and_resume(cid, txt, img):
                     try:
                         handle_chat_direct(cid, txt, img)
