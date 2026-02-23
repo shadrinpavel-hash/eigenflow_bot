@@ -373,14 +373,10 @@ class OuroborosAgent:
         try:
             state_path = self.env.drive_path("state") / "state.json"
             state_data = json.loads(read_text(state_path))
-        
-            total_budget_str = os.environ.get("TOTAL_BUDGET", "").strip()
-        
-            if total_budget_str:
-                total_budget = float(total_budget_str)
-                if total_budget > 0:
-                    spent = float(state_data.get("spent_usd", 0))
-                    budget_remaining = max(0, total_budget - spent)
+            total_budget = float(os.environ.get("TOTAL_BUDGET", "1"))
+            spent = float(state_data.get("spent_usd", 0))
+            if total_budget > 0:
+                budget_remaining = max(0, total_budget - spent)
         except Exception:
             pass
 
