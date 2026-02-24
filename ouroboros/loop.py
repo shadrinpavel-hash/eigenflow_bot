@@ -590,21 +590,15 @@ def _drain_incoming_messages(
 
 
 def _check_repetition_guard(round_idx: int, llm_trace: dict, messages: list) -> None:
-    """Inject a warning into messages if the same tool is called 3x in a row."""
-    if round_idx > 4 and len(llm_trace["tool_calls"]) >= 3:
-        last3 = [
-            (tc.get("name"), str(tc.get("args", {}))[:100])
-            for tc in llm_trace["tool_calls"][-3:]
-        ]
-        if len(set(last3)) == 1:
-            messages.append({
-                "role": "system",
-                "content": (
-                    f"[REPETITION_GUARD] You called {last3[0][0]}() with identical args "
-                    f"3 times in a row. Stop looping. Return final answer or try a "
-                    f"completely different approach."
-                )
-            })
+    """Warn LLM if same tool called 3x in a row."""
+    if round_idx <= 4 or len(llm_trace["tool_calls"]) < 3:
+        return
+    last3 = [(tc.get("name"), str(tc.get("args", {}))[:100]) for tc in llm_trace["tool_calls"][-3:]]
+    if len(set(last3)) == 1:
+        messages.append({"role": "system", "content": (
+            f"[REPETITION_GUARD] You called {last3[0][0]}() with identical args 3 times in a row. "
+            f"Stop looping. Return final answer or try a completely different approach."
+        )})
 
 def run_llm_loop(
     messages: List[Dict[str, Any]],
