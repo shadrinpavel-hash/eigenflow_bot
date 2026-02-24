@@ -412,8 +412,10 @@ def _handle_supervisor_command(text: str, chat_id: int, tg_offset: int = 0):
     """Handle supervisor slash-commands.
 
     Returns:
-        True  — terminal command fully handled (caller should `continue`)
-        str   — dual-path note to prepend (caller falls through to LLM)
+        True  — terminal command fully handled (caller should `continue`).
+                /panic, /restart, /status, /bg, /evolve are terminal.
+        str   — dual-path note to prepend (caller falls through to LLM).
+                Only /review uses this path.
         ""    — not a recognized command (falsy, caller falls through)
     """
     lowered = text.strip().lower()
@@ -443,7 +445,7 @@ def _handle_supervisor_command(text: str, chat_id: int, tg_offset: int = 0):
     if lowered.startswith("/status"):
         status = status_text(WORKERS, PENDING, RUNNING, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC)
         send_with_budget(chat_id, status, force_budget=True)
-        return "[Supervisor handled /status — status text already sent to chat]\n"
+        return True  # terminal: supervisor already replied
 
     if lowered.startswith("/review"):
         queue_review_task(reason="owner:/review", force=True)
@@ -462,7 +464,7 @@ def _handle_supervisor_command(text: str, chat_id: int, tg_offset: int = 0):
             persist_queue_snapshot(reason="evolve_off")
         state_str = "ON" if turn_on else "OFF"
         send_with_budget(chat_id, f"🧬 Evolution: {state_str}")
-        return f"[Supervisor handled /evolve — evolution toggled {state_str}]\n"
+        return True  # terminal: supervisor already replied
 
     if lowered.startswith("/bg"):
         parts = lowered.split()
@@ -476,7 +478,7 @@ def _handle_supervisor_command(text: str, chat_id: int, tg_offset: int = 0):
         else:
             bg_status = "running" if _consciousness.is_running else "stopped"
             send_with_budget(chat_id, f"🧠 Background consciousness: {bg_status}")
-        return f"[Supervisor handled /bg {action}]\n"
+        return True  # terminal: supervisor already replied
 
     return ""
 
