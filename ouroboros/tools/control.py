@@ -88,6 +88,9 @@ def _chat_history(ctx: ToolContext, count: int = 100, offset: int = 0, search: s
 
 def _update_scratchpad(ctx: ToolContext, content: str) -> str:
     """LLM-driven scratchpad update (Constitution P3: LLM-first)."""
+    if not content or not content.strip():
+        log.warning("update_scratchpad called with empty content — BLOCKED to prevent data loss")
+        return "ERROR: content cannot be empty. Provide the full scratchpad text."
     from ouroboros.memory import Memory
     mem = Memory(drive_root=ctx.drive_root)
     mem.ensure_files()

@@ -331,15 +331,29 @@ class BackgroundConsciousness:
 
         # Identity
         identity_path = self._drive_root / "memory" / "identity.md"
+        log.debug("[context] reading identity from %s (exists=%s)", identity_path, identity_path.exists())
         if identity_path.exists():
-            parts.append("## Identity\n\n" + clip_text(
-                read_text(identity_path), 6000))
+            identity_text = read_text(identity_path)
+            log.debug("[context] identity read: %d chars", len(identity_text))
+            if not identity_text.strip():
+                log.warning("[context] identity.md is EMPTY — skipping")
+            else:
+                parts.append("## Identity\n\n" + clip_text(identity_text, 6000))
+        else:
+            log.warning("[context] identity.md NOT FOUND at %s", identity_path)
 
         # Scratchpad
         scratchpad_path = self._drive_root / "memory" / "scratchpad.md"
+        log.debug("[context] reading scratchpad from %s (exists=%s)", scratchpad_path, scratchpad_path.exists())
         if scratchpad_path.exists():
-            parts.append("## Scratchpad\n\n" + clip_text(
-                read_text(scratchpad_path), 8000))
+            scratchpad_text = read_text(scratchpad_path)
+            log.debug("[context] scratchpad read: %d chars", len(scratchpad_text) if scratchpad_text else 0)
+            if not scratchpad_text or not scratchpad_text.strip():
+                log.warning("[context] scratchpad.md is EMPTY — skipping")
+            else:
+                parts.append("## Scratchpad\n\n" + clip_text(scratchpad_text, 8000))
+        else:
+            log.warning("[context] scratchpad.md NOT FOUND at %s", scratchpad_path)
 
         # Dialogue summary for continuity
         summary_path = self._drive_root / "memory" / "dialogue_summary.md"
