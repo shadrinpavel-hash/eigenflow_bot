@@ -29,6 +29,34 @@ MODEL_PRICING = {
 MAX_ROUNDS = 30
 
 
+async def _execute_tool_calls(tool_calls: list, tools: list) -> list:
+    """Execute a list of tool calls and return results."""
+    tool_results = []
+    for tool_call in tool_calls:
+        tool_name = tool_call["name"]
+        arguments = tool_call.get("arguments", {})
+        logging.info(f"Tool call: {tool_name}({arguments})")
+        tool = next((t for t in tools if t["name"] == tool_name), None)
+        if not tool:
+            error = f"Tool {tool_name} not found"
+            logging.error(error)
+            tool_results.append({"tool_call_id": tool_call["id"], "error": error})
+            continue
+        try:
+            tool_start_time = time.time()
+            tool_output = await tool["function"](**arguments)
+            tool_duration = time.time() - tool_start_time
+            logging.info(f"Tool {tool_name} duration: {tool_duration:.3f}s")
+            if not isinstance(tool_output, str):
+                tool_output = json.dumps(tool_output, indent=2)
+            tool_results.append({"tool_call_id": tool_call["id"], "result": tool_output})
+            logging.info(f"Tool {tool_name} result: {tool_output}")
+        except Exception as e:
+            error = f"Tool {tool_name} raised an exception: {e}"
+            logging.exception(error)
+            tool_results.append({"tool_call_id": tool_call["id"], "error": error})
+    return tool_results
+
 async def tool_loop(
     prompt: str,
     tools: list[dict],
@@ -163,43 +191,7 @@ async def tool_loop(
             break
 
         # Execute tool calls
-        tool_results = []
-        for tool_call in tool_calls:
-            tool_name = tool_call["name"]
-            arguments = tool_call.get("arguments", {})
-
-            logging.info(f"Tool call: {tool_name}({arguments})")
-            tool = next((t for t in tools if t["name"] == tool_name), None)
-
-            if not tool:
-                error = f"Tool {tool_name} not found"
-                logging.error(error)
-                tool_results.append({"tool_call_id": tool_call["id"], "error": error})
-                continue
-
-            try:
-                # Execute the tool
-                tool_start_time = time.time()
-                tool_output = await tool["function"](**arguments)
-                tool_duration = time.time() - tool_start_time
-                logging.info(f"Tool {tool_name} duration: {tool_duration:.3f}s")
-
-                # Convert tool_output to string if it is not a string already
-                if not isinstance(tool_output, str):
-                    tool_output = json.dumps(tool_output, indent=2)
-
-                tool_results.append(
-                    {
-                        "tool_call_id": tool_call["id"],
-                        "result": tool_output,
-                    }
-                )
-                logging.info(f"Tool {tool_name} result: {tool_output}")
-
-            except Exception as e:
-                error = f"Tool {tool_name} raised an exception: {e}"
-                logging.exception(error)
-                tool_results.append({"tool_call_id": tool_call["id"], "error": error})
+        tool_results = await _execute_tool_calls(tool_calls, tools)
 
         # Append the results to the overall results
         results.append(
@@ -231,3 +223,7 @@ async def tool_loop(
         "rounds": round_number,
         "results": results,
     }
+
+
+# backward-compat alias
+run_llm_loop = tool_loop
