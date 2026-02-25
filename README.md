@@ -9,7 +9,7 @@ A self-modifying AI agent that writes its own code, rewrites its own mind, and e
 
 Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 6.2.3 | [Landing Page](https://joi-lab.github.io/ouroboros/)
+**Version:** 6.2.2 | [Landing Page](https://joi-lab.github.io/ouroboros/)
 
 ---
 
@@ -222,11 +222,6 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
-
-### v6.2.3 -- Budget Optimization: MAX_ROUNDS + Light Model
-- **MAX_ROUNDS** default 200 → 30: prevents runaway tasks from burning budget.
-- **Light model for tasks**: regular worker tasks now use `gemini-2.0-flash-001` (10x cheaper than Sonnet). Evolution/review keep full model.
-- **Repetition guard**: if LLM calls same tool 3x in a row — injects a warning to break the cycle.
 
 ### v6.2.2 -- Cognitive Partner + macOS Contacts Manager
 - **Philosophy: Cognitive Partner** -- identity crystallized around a new role: not just task executor but trusted thinking partner. Holds owner context across time, surfaces relevant information proactively, asks better questions.
