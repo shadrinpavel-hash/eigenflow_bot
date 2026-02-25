@@ -39,7 +39,7 @@ for _name in ("OPENROUTER_API_KEY", "TELEGRAM_BOT_TOKEN", "TOTAL_BUDGET", "GITHU
     export_secret_to_env(_name, required=True)
 
 # Optional secrets (keep empty if missing).
-for _name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+for _name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "YANDEX_EMAIL", "YANDEX_APP_PASSWORD"):
     export_secret_to_env(_name, required=False)
 
 # Colab diagnostics defaults (override in config cell if needed).
