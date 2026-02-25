@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import time
+import os
 from concurrent.futures import CancelledError
 from typing import Any, Coroutine, Dict, List
 
@@ -40,9 +41,9 @@ def _calc_cost(tokens: int, model: str, token_type: str) -> float:
 
 
 async def tool_loop(
-    prompt: str,
-    tools: list[dict],
-    model: str,
+    prompt: str | None = None,
+    tools: list[dict] | None = None,
+    model: str | None = None,
     max_rounds: int = MAX_ROUNDS,
     chat_history: list[dict] | None = None,
     messages: list[dict] | None = None,
@@ -50,6 +51,18 @@ async def tool_loop(
     **kwargs: Any,
 ) -> Dict[str, Any]:
     logging.info(f"Starting tool loop with model={model}")
+
+    # Backward-compat: normalize tools/model
+    if tools is None:
+        tools = []
+    if model is None or model == "":
+        model = os.environ.get("OUROBOROS_MODEL") or "openai/gpt-4o-mini"
+
+    # Backward-compat: default model from env if not provided
+    if model is None or model == "":
+        model = os.environ.get("OUROBOROS_MODEL") or "openai/gpt-4o-mini"
+    if prompt is None:
+        prompt = ""
 
     # Backward-compat: older callers pass messages=
     if messages and (prompt is None or prompt == ""):
@@ -66,6 +79,10 @@ async def tool_loop(
                     chat_history = messages[:last_user_idx]
         except Exception:
             pass
+
+    # Backward-compat: ensure prompt is set
+    if prompt is None:
+        prompt = ""
 
     fallback_model = "openai/gpt-4o-mini" if model in (
         "google/gemini-2.0-flash-001", "google/gemini-2.5-flash-lite"
