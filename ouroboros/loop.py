@@ -601,7 +601,6 @@ def run_llm_loop(
     budget_remaining_usd: Optional[float] = None,
     event_queue: Optional[queue.Queue] = None,
     initial_effort: str = "medium",
-    initial_model_override: Optional[str] = None,
     drive_root: Optional[pathlib.Path] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
@@ -617,7 +616,7 @@ def run_llm_loop(
     Returns: (final_text, accumulated_usage, llm_trace)
     """
     # LLM-first: single default model, LLM switches via tool if needed
-    active_model = initial_model_override or llm.default_model()
+    active_model = llm.default_model()
     active_effort = initial_effort
 
     llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}
@@ -639,30 +638,14 @@ def run_llm_loop(
     # Dedup set for per-task owner messages from Drive mailbox
     _owner_msg_seen: set = set()
     try:
-        MAX_ROUNDS = max(1, int(os.environ.get("OUROBOROS_MAX_ROUNDS", "30")))
+        MAX_ROUNDS = max(1, int(os.environ.get("OUROBOROS_MAX_ROUNDS", "200")))
     except (ValueError, TypeError):
-        MAX_ROUNDS = 30
-        log.warning("Invalid OUROBOROS_MAX_ROUNDS, defaulting to 30")
+        MAX_ROUNDS = 200
+        log.warning("Invalid OUROBOROS_MAX_ROUNDS, defaulting to 200")
     round_idx = 0
     try:
         while True:
             round_idx += 1
-
-            # Repetition guard: if last 3 tool calls are identical, warn the LLM
-            if round_idx > 4 and len(llm_trace["tool_calls"]) >= 3:
-                _last3 = [
-                    (tc.get("name"), str(tc.get("args", {}))[:100])
-                    for tc in llm_trace["tool_calls"][-3:]
-                ]
-                if len(set(_last3)) == 1:
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            f"[REPETITION_GUARD] You called {_last3[0][0]}() with identical args "
-                            f"3 times in a row. Stop looping. Return final answer or try a "
-                            f"completely different approach."
-                        )
-                    })
 
             # Hard limit on rounds to prevent runaway tasks
             if round_idx > MAX_ROUNDS:

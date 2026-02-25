@@ -412,11 +412,8 @@ class OuroborosAgent:
             task_type_str = str(task.get("type") or "").lower()
             if task_type_str in ("evolution", "review"):
                 initial_effort = "high"
-                _task_model_override = None  # use main model for important tasks
             else:
                 initial_effort = "medium"
-                # Use light model for regular tasks if configured
-                _task_model_override = os.environ.get("OUROBOROS_MODEL_LIGHT") or None
 
             try:
                 text, usage, llm_trace = run_llm_loop(
@@ -431,7 +428,6 @@ class OuroborosAgent:
                     budget_remaining_usd=budget_remaining,
                     event_queue=self._event_queue,
                     initial_effort=initial_effort,
-                    initial_model_override=_task_model_override,
                     drive_root=self.env.drive_root,
                 )
             except Exception as e:
