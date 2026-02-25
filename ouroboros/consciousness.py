@@ -171,8 +171,7 @@ class BackgroundConsciousness:
     def _check_budget(self) -> bool:
         """Check if background consciousness is within its budget allocation."""
         try:
-            total_budget_str = os.environ.get("TOTAL_BUDGET", "").strip()
-            total_budget = float(total_budget_str) if total_budget_str else 200.0
+            total_budget = float(os.environ.get("TOTAL_BUDGET", "1"))
             if total_budget <= 0:
                 return True
             max_bg = total_budget * (self._bg_budget_pct / 100.0)
@@ -359,8 +358,7 @@ class BackgroundConsciousness:
             state_path = self._drive_root / "state" / "state.json"
             if state_path.exists():
                 state_data = json.loads(read_text(state_path))
-                total_budget_str = os.environ.get("TOTAL_BUDGET", "").strip()
-            total_budget = float(total_budget_str) if total_budget_str else 200.0
+                total_budget = float(os.environ.get("TOTAL_BUDGET", "1"))
                 spent = float(state_data.get("spent_usd", 0))
                 if total_budget > 0:
                     remaining = max(0, total_budget - spent)
