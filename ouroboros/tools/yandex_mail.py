@@ -3,6 +3,9 @@
 Tools:
   yandex_read_inbox  — fetch the latest N messages from INBOX
   yandex_search_mail — search by sender, subject, text, date range
+
+Credentials are read from os.environ (YANDEX_EMAIL, YANDEX_APP_PASSWORD).
+Fallback: /tmp/ouroboros.env (session-local file written by launcher).
 """
 
 from __future__ import annotations
@@ -20,9 +23,37 @@ from ouroboros.tools.registry import ToolContext, ToolEntry
 # Helpers
 # ---------------------------------------------------------------------------
 
+_TMP_ENV_FILE = "/tmp/ouroboros.env"
+
+
+def _load_tmp_env() -> dict:
+    """Read KEY=VALUE pairs from /tmp/ouroboros.env (session-local, not on Drive)."""
+    result: dict = {}
+    try:
+        if os.path.exists(_TMP_ENV_FILE):
+            with open(_TMP_ENV_FILE, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        result[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return result
+
+
 def _get_credentials() -> tuple[str, str]:
     email_addr = os.environ.get("YANDEX_EMAIL", "")
     password = os.environ.get("YANDEX_APP_PASSWORD", "")
+
+    # Fallback: read from session-local env file written by launcher
+    if not email_addr or not password:
+        tmp_env = _load_tmp_env()
+        if not email_addr:
+            email_addr = tmp_env.get("YANDEX_EMAIL", "")
+        if not password:
+            password = tmp_env.get("YANDEX_APP_PASSWORD", "")
+
     return email_addr, password
 
 
@@ -66,8 +97,13 @@ def _connect() -> imaplib.IMAP4_SSL:
     email_addr, password = _get_credentials()
     if not email_addr or not password:
         raise RuntimeError(
-            "YANDEX_EMAIL or YANDEX_APP_PASSWORD not set. "
-            "Add them to Colab Secrets and make sure Notebook Access is enabled."
+            "YANDEX_EMAIL or YANDEX_APP_PASSWORD not set.\n"
+            "Run this once in a Colab cell before starting the agent:\n\n"
+            "  from google.colab import userdata\n"
+            "  with open('/tmp/ouroboros.env', 'w') as f:\n"
+            "      f.write(f\"YANDEX_EMAIL={userdata.get('YANDEX_EMAIL')}\\n\")\n"
+            "      f.write(f\"YANDEX_APP_PASSWORD={userdata.get('YANDEX_APP_PASSWORD')}\\n\")\n"
+            "  print('Done')"
         )
     conn = imaplib.IMAP4_SSL("imap.yandex.ru", 993)
     conn.login(email_addr, password)
