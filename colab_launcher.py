@@ -133,7 +133,7 @@ _EXPENSIVE_BG_MODELS = {
     "openai/gpt-5",
     "openai/o3",
 }
-_FLASH_FALLBACK = "google/gemini-2.0-flash-001"
+_FLASH_FALLBACK = "google/gemini-2.5-flash-lite"
 
 if _RAW_MODEL_LIGHT and str(_RAW_MODEL_LIGHT).strip() in _EXPENSIVE_BG_MODELS:
     print(f"[cfg] BG cost guard: {_RAW_MODEL_LIGHT!r} -> {_FLASH_FALLBACK!r} (expensive model blocked for background tasks)")
