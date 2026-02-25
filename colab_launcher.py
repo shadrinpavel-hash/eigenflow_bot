@@ -141,6 +141,15 @@ if _RAW_MODEL_LIGHT and str(_RAW_MODEL_LIGHT).strip() in _EXPENSIVE_BG_MODELS:
 else:
     MODEL_LIGHT = _RAW_MODEL_LIGHT
 
+# Deprecated model migration: auto-replace discontinued models
+_DEPRECATED_LIGHT_MODELS = {
+    "google/gemini-2.0-flash-001": "google/gemini-2.5-flash-lite",
+}
+if MODEL_LIGHT and str(MODEL_LIGHT).strip() in _DEPRECATED_LIGHT_MODELS:
+    _replacement = _DEPRECATED_LIGHT_MODELS[str(MODEL_LIGHT).strip()]
+    print(f"[cfg] Model migration: {MODEL_LIGHT!r} -> {_replacement!r} (deprecated model auto-replaced)")
+    MODEL_LIGHT = _replacement
+
 BUDGET_REPORT_EVERY_MESSAGES = 10
 SOFT_TIMEOUT_SEC = max(60, int(get_cfg("OUROBOROS_SOFT_TIMEOUT_SEC", default="600", allow_legacy_secret=True) or "600"))
 HARD_TIMEOUT_SEC = max(120, int(get_cfg("OUROBOROS_HARD_TIMEOUT_SEC", default="1800", allow_legacy_secret=True) or "1800"))
