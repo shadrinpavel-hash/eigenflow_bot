@@ -47,6 +47,7 @@ async def tool_loop(
     chat_history: list[dict] | None = None,
     messages: list[dict] | None = None,
     available_budget: float = 1000000,  # effectively unlimited
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     logging.info(f"Starting tool loop with model={model}")
 
