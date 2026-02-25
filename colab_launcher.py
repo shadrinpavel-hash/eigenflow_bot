@@ -600,7 +600,7 @@ while True:
             continue  # empty message, skip
 
         # Feed observation to consciousness
-        _consciousness.inject_observation(f"Owner message: {text[:100]}")
+        _consciousness.inject_observation(f"[Owner message — ALREADY HANDLED BY MAIN AGENT, do NOT respond]: {text[:100]}")
 
         agent = _get_chat_agent()
 

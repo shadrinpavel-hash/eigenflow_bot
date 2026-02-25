@@ -178,6 +178,11 @@ class BackgroundConsciousness:
         model = self._model
 
         tools = self._tool_schemas()
+
+        # GUARD: If observations contain owner messages already handled by main agent,
+        # remove send_owner_message from available tools to prevent duplicate responses.
+        if 'ALREADY HANDLED BY MAIN AGENT' in context:
+            tools = [t for t in tools if t.get('function', {}).get('name') != 'send_owner_message']
         messages = [
             {"role": "system", "content": context},
             {"role": "user", "content": "Wake up. Think."},
@@ -333,7 +338,7 @@ class BackgroundConsciousness:
             except queue.Empty:
                 break
         if observations:
-            parts.append("## Recent observations\n\n" + "\n".join(
+            parts.append("## Recent observations (already handled by main agent — DO NOT respond to these)\n\n" + "\n".join(
                 f"- {o}" for o in observations[-10:]))
 
         # Runtime info + state
@@ -373,7 +378,7 @@ class BackgroundConsciousness:
         "knowledge_read", "knowledge_write", "knowledge_list",
         # Read-only tools for awareness
         "web_search", "repo_read", "repo_list", "drive_read", "drive_list",
-        "chat_history",
+        # "chat_history",  # REMOVED: causes consciousness to react to old owner messages
         # GitHub Issues
         "list_github_issues", "get_github_issue",
     })
