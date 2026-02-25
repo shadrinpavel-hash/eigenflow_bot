@@ -1,13 +1,15 @@
-"""Yandex Mail IMAP tools — read inbox and search mail.
+"""Yandex Mail IMAP tools — read inbox, search mail, and monitor important emails.
 
 Tools:
   yandex_read_inbox        — fetch the latest N messages from INBOX
   yandex_search_mail       — search by sender, subject, text, date range
   yandex_check_credentials — verify secrets are available and test connection
+  yandex_monitor_inbox    — quick triage feed with basic importance scoring
 
 Credential resolution order (first non-empty wins):
   1. os.environ  — set by colab_launcher.py via userdata.get() before fork
-  2. /tmp/ouroboros.env — session env file written by launcher (subprocess fallback)
+  2. OUROBOROS_SESSION_ENV_FILE (default /tmp/ouroboros.env) —
+     session env file written by launcher (subprocess fallback)
   3. google.colab.userdata — works only in direct Jupyter kernel context
 """
 
@@ -16,6 +18,7 @@ from __future__ import annotations
 import email
 import imaplib
 import os
+import re
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
 from typing import List, Optional
@@ -25,6 +28,12 @@ from ouroboros.tools.registry import ToolContext, ToolEntry
 # ---------------------------------------------------------------------------
 # Credential helpers
 # ---------------------------------------------------------------------------
+
+
+def _session_env_file_path() -> str:
+    """Return path to launcher-written session env file."""
+    return os.environ.get("OUROBOROS_SESSION_ENV_FILE", "/tmp/ouroboros.env")
+
 
 def _load_env_file(path: str) -> dict:
     """Read key=value pairs from a file. Returns {} on error."""
@@ -42,19 +51,21 @@ def _load_env_file(path: str) -> dict:
     return result
 
 
-def _get_credentials() -> tuple[str, str]:
-    """Read YANDEX_EMAIL and YANDEX_APP_PASSWORD.
-
-    Tries multiple sources in priority order so the tool works both when
-    called from a forked worker (os.environ inherited from launcher) and
-    from a fresh subprocess that can't use google.colab.userdata directly.
-    """
+def _resolve_credentials() -> tuple[str, str, list[str]]:
+    """Read YANDEX_EMAIL and YANDEX_APP_PASSWORD and return credential sources."""
+    sources: list[str] = []
     email_addr = os.environ.get("YANDEX_EMAIL", "").strip()
     password = os.environ.get("YANDEX_APP_PASSWORD", "").strip()
 
+    if email_addr or password:
+        sources.append("os.environ")
+
     if not email_addr or not password:
-        # Fallback 1: /tmp/ouroboros.env — written by colab_launcher.py from Jupyter kernel
-        env = _load_env_file("/tmp/ouroboros.env")
+        # Fallback 1: launcher-written env file (default /tmp/ouroboros.env)
+        session_env_path = _session_env_file_path()
+        env = _load_env_file(session_env_path)
+        if (not email_addr and env.get("YANDEX_EMAIL")) or (not password and env.get("YANDEX_APP_PASSWORD")):
+            sources.append(session_env_path)
         if not email_addr and env.get("YANDEX_EMAIL"):
             email_addr = env["YANDEX_EMAIL"]
             os.environ["YANDEX_EMAIL"] = email_addr
@@ -66,19 +77,33 @@ def _get_credentials() -> tuple[str, str]:
         # Fallback 2: google.colab.userdata (works only inside Jupyter kernel)
         try:
             from google.colab import userdata  # type: ignore
+
+            colab_hit = False
             if not email_addr:
                 v = (userdata.get("YANDEX_EMAIL") or "").strip()
                 if v:
                     email_addr = v
                     os.environ["YANDEX_EMAIL"] = v
+                    colab_hit = True
             if not password:
                 v = (userdata.get("YANDEX_APP_PASSWORD") or "").strip()
                 if v:
                     password = v
                     os.environ["YANDEX_APP_PASSWORD"] = v
+                    colab_hit = True
+            if colab_hit:
+                sources.append("google.colab.userdata")
         except Exception:
             pass
 
+    # Preserve order while removing duplicates
+    unique_sources = list(dict.fromkeys(sources))
+    return email_addr, password, unique_sources
+
+
+def _get_credentials() -> tuple[str, str]:
+    """Read YANDEX_EMAIL and YANDEX_APP_PASSWORD."""
+    email_addr, password, _ = _resolve_credentials()
     return email_addr, password
 
 
@@ -104,10 +129,23 @@ def _get_body(msg) -> str:
     body = ""
     if msg.is_multipart():
         for part in msg.walk():
-            if part.get_content_type() == "text/plain":
-                payload = part.get_payload(decode=True)
-                charset = part.get_content_charset() or "utf-8"
+            ctype = part.get_content_type()
+            if ctype != "text/plain":
+                continue
+            disposition = (part.get("Content-Disposition") or "").lower()
+            if "attachment" in disposition:
+                continue
+            if part.get_filename():
+                continue
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            charset = part.get_content_charset() or "utf-8"
+            try:
                 body = payload.decode(charset, errors="replace")
+            except Exception:
+                body = payload.decode("utf-8", errors="replace")
+            if body.strip():
                 break
     else:
         payload = msg.get_payload(decode=True)
@@ -115,6 +153,49 @@ def _get_body(msg) -> str:
             charset = msg.get_content_charset() or "utf-8"
             body = payload.decode(charset, errors="replace")
     return body[:1000].strip()
+
+
+def _is_likely_important(message: dict) -> tuple[bool, list[str]]:
+    """Heuristic scoring for important/urgent emails.
+
+    This is intentionally lightweight (no LLM call) so it can run every cycle.
+    """
+    reasons: list[str] = []
+    bucket = " ".join(
+        [
+            str(message.get("subject", "")),
+            str(message.get("preview", "")),
+            str(message.get("from", "")),
+        ]
+    ).lower()
+
+    urgent_patterns = [
+        r"\burgent\b",
+        r"\basap\b",
+        r"\bсрочно\b",
+        r"\bважно\b",
+        r"deadline",
+        r"до\s+\d{1,2}[:.]\d{2}",
+        r"до\s+\d{1,2}\s+[а-яa-z]+",
+    ]
+    business_patterns = [
+        r"invoice|оплат|счет|счёт|payment",
+        r"contract|договор|agreement",
+        r"security|password|парол|2fa|код подтверждения",
+        r"interview|собеседован|offer",
+    ]
+
+    if any(re.search(p, bucket, flags=re.IGNORECASE) for p in urgent_patterns):
+        reasons.append("обнаружены маркеры срочности")
+    if any(re.search(p, bucket, flags=re.IGNORECASE) for p in business_patterns):
+        reasons.append("похоже на деловую/критичную тему")
+
+    sender = str(message.get("from", "")).lower()
+    if any(k in sender for k in ("noreply@", "no-reply@", "mailer-daemon")):
+        reasons.append("системный отправитель")
+
+    important = len(reasons) >= 1 and "системный отправитель" not in reasons
+    return important, reasons
 
 
 def _connect() -> imaplib.IMAP4_SSL:
@@ -169,6 +250,27 @@ def _format_messages(messages: list, header: str, preview_len: int = 300) -> str
         if m["preview"]:
             lines.append(f"   Превью: {m['preview'][:preview_len]}")
         lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _format_monitor_messages(messages: list) -> str:
+    """Format triage output with importance flags and short rationale."""
+    lines = ["📡 Мониторинг INBOX (новые сверху):", ""]
+    important_total = 0
+    for i, message in enumerate(messages, 1):
+        important, reasons = _is_likely_important(message)
+        if important:
+            important_total += 1
+        flag = "🔴 ВАЖНО" if important else "🟢"
+        lines.append(f"{i}. {flag} [{message['date']}] {message['from']}")
+        lines.append(f"   Тема: {message['subject']}")
+        if reasons and important:
+            lines.append(f"   Почему: {', '.join(reasons[:2])}")
+        if message["preview"]:
+            lines.append(f"   Превью: {message['preview'][:240]}")
+        lines.append("")
+
+    lines.append(f"Итого важных писем: {important_total} из {len(messages)}")
     return "\n".join(lines).rstrip()
 
 
@@ -264,16 +366,7 @@ def _yandex_search_mail(
 
 def _yandex_check_credentials(ctx: ToolContext) -> str:
     """Check if Yandex Mail credentials are available and test the IMAP connection."""
-    email_addr, password = _get_credentials()
-
-    # Diagnose what's available and from where
-    sources = []
-    if os.environ.get("YANDEX_EMAIL"):
-        sources.append("os.environ")
-    elif os.path.exists("/tmp/ouroboros.env"):
-        env = _load_env_file("/tmp/ouroboros.env")
-        if env.get("YANDEX_EMAIL"):
-            sources.append("/tmp/ouroboros.env")
+    email_addr, password, sources = _resolve_credentials()
 
     if not email_addr:
         return (
@@ -297,6 +390,41 @@ def _yandex_check_credentials(ctx: ToolContext) -> str:
         )
     except Exception as e:
         return f"❌ Ошибка подключения к imap.yandex.ru{source_info}: {e}"
+
+
+def _yandex_monitor_inbox(
+    ctx: ToolContext,
+    limit: int = 20,
+    unseen_only: bool = True,
+) -> str:
+    """Quick mailbox monitoring feed with basic importance triage.
+
+    Args:
+        limit: Number of latest emails to inspect (1..50).
+        unseen_only: If true, inspect only unread messages.
+    """
+    limit = max(1, min(int(limit), 50))
+
+    try:
+        conn = _connect()
+        conn.select("INBOX")
+        query = "UNSEEN" if unseen_only else "ALL"
+        status, data = conn.uid("search", None, query)
+        if status != "OK" or not data[0]:
+            conn.logout()
+            mode = "непрочитанных" if unseen_only else "сообщений"
+            return f"Писем не найдено ({mode})."
+
+        all_uids = data[0].split()
+        uids = list(reversed(all_uids[-limit:]))
+        messages = _fetch_messages(conn, uids)
+        conn.logout()
+
+        if not messages:
+            return "Писем не найдено."
+        return _format_monitor_messages(messages)
+    except Exception as e:
+        return f"Ошибка мониторинга почты: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -382,5 +510,31 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=_yandex_check_credentials,
             timeout_sec=15,
+        ),
+        ToolEntry(
+            name="yandex_monitor_inbox",
+            schema={
+                "name": "yandex_monitor_inbox",
+                "description": (
+                    "Monitor Yandex inbox (preferably unread emails) and return a triage feed "
+                    "with likely-important messages highlighted for fast reaction."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "How many latest messages to inspect (default 20, max 50)",
+                        },
+                        "unseen_only": {
+                            "type": "boolean",
+                            "description": "If true, inspect only unread messages (default true)",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            handler=_yandex_monitor_inbox,
+            timeout_sec=30,
         ),
     ]
