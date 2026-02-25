@@ -88,7 +88,7 @@ CORE_TOOL_NAMES = {
     "request_restart", "promote_to_stable",
     "knowledge_read", "knowledge_write",
     "browse_page", "browser_action", "analyze_screenshot",
-    "yandex_read_inbox", "yandex_search_mail", "yandex_check_credentials", "yandex_monitor_inbox",
+    "yandex_read_inbox", "yandex_search_mail", "yandex_check_credentials", "yandex_monitor_inbox", "email_digest",
 }
 
 

@@ -348,6 +348,47 @@ _watchdog_thread = threading.Thread(target=_chat_watchdog_loop, daemon=True)
 _watchdog_thread.start()
 
 # ----------------------------
+# 6.2.5) Email digest scheduler
+# ----------------------------
+
+def _digest_scheduler_loop():
+    """Background daemon: sends email digest at 9:00 and 14:00 MSK."""
+    import datetime
+    import pytz
+    MSK = pytz.timezone("Europe/Moscow")
+    DIGEST_HOURS = {9, 14}  # MSK hours to send digest
+    _fired_today: set = set()  # (hour, date) already fired
+
+    while True:
+        try:
+            now_msk = datetime.datetime.now(MSK)
+            key = (now_msk.hour, now_msk.date())
+            if now_msk.hour in DIGEST_HOURS and key not in _fired_today:
+                _fired_today.add(key)
+                hours_back = 5 if now_msk.hour == 14 else 19
+                label = "09:00" if now_msk.hour == 9 else "14:00"
+                log.info(f"[digest_scheduler] Firing {label} digest (last {hours_back}h)")
+                enqueue_task(
+                    description=(
+                        f"Send email digest for {label} MSK. "
+                        f"Scan last {hours_back} hours of Yandex inbox. "
+                        "Use the email_digest tool to classify and send the Telegram summary."
+                    ),
+                    priority=5,
+                )
+            # Keep _fired_today small — purge entries older than today
+            today = now_msk.date()
+            _fired_today = {k for k in _fired_today if k[1] == today}
+        except Exception:
+            log.debug("[digest_scheduler] error", exc_info=True)
+        time.sleep(60)  # check every minute
+
+
+_digest_scheduler_thread = threading.Thread(target=_digest_scheduler_loop, daemon=True)
+_digest_scheduler_thread.start()
+
+
+# ----------------------------
 # 6.3) Background consciousness
 # ----------------------------
 from ouroboros.consciousness import BackgroundConsciousness
