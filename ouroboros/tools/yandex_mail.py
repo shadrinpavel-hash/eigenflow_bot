@@ -1,22 +1,33 @@
-"""Yandex Mail IMAP tools — read inbox and search mail."""
+"""Yandex Mail IMAP tools — read inbox and search mail.
 
-import imaplib
+Tools:
+  yandex_read_inbox  — fetch the latest N messages from INBOX
+  yandex_search_mail — search by sender, subject, text, date range
+"""
+
+from __future__ import annotations
+
 import email
+import imaplib
 import os
-import re
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
-from typing import Optional
+from typing import List
 
+from ouroboros.tools.registry import ToolContext, ToolEntry
 
-def _get_credentials():
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _get_credentials() -> tuple[str, str]:
     email_addr = os.environ.get("YANDEX_EMAIL", "")
     password = os.environ.get("YANDEX_APP_PASSWORD", "")
     return email_addr, password
 
 
 def _decode_str(value) -> str:
-    """Decode email header string (may be encoded)."""
+    """Decode possibly-encoded email header value."""
     if value is None:
         return ""
     parts = decode_header(value)
@@ -33,12 +44,11 @@ def _decode_str(value) -> str:
 
 
 def _get_body(msg) -> str:
-    """Extract plain text body (first ~500 chars)."""
+    """Extract plain text body (first 500 chars)."""
     body = ""
     if msg.is_multipart():
         for part in msg.walk():
-            ctype = part.get_content_type()
-            if ctype == "text/plain":
+            if part.get_content_type() == "text/plain":
                 payload = part.get_payload(decode=True)
                 charset = part.get_content_charset() or "utf-8"
                 body = payload.decode(charset, errors="replace")
@@ -51,27 +61,28 @@ def _get_body(msg) -> str:
     return body[:500].strip()
 
 
-def _connect():
-    """Connect and login to Yandex IMAP."""
+def _connect() -> imaplib.IMAP4_SSL:
+    """Establish authenticated IMAP connection to Yandex."""
     email_addr, password = _get_credentials()
     if not email_addr or not password:
         raise RuntimeError(
-            "YANDEX_EMAIL or YANDEX_APP_PASSWORD not set in environment"
+            "YANDEX_EMAIL or YANDEX_APP_PASSWORD not set. "
+            "Add them to Colab Secrets and make sure Notebook Access is enabled."
         )
     conn = imaplib.IMAP4_SSL("imap.yandex.ru", 993)
     conn.login(email_addr, password)
     return conn
 
 
-def _fetch_messages(conn, uids: list) -> list:
-    """Fetch and parse messages by UID list."""
-    results = []
+def _fetch_messages(conn: imaplib.IMAP4_SSL, uids: list) -> list:
+    """Fetch and parse messages by UID list. Returns list of dicts."""
     if not uids:
-        return results
+        return []
     uid_str = b",".join(uids)
     status, data = conn.uid("fetch", uid_str, "(RFC822)")
     if status != "OK":
-        return results
+        return []
+    results = []
     for response in data:
         if isinstance(response, tuple):
             msg = email.message_from_bytes(response[1])
@@ -92,77 +103,69 @@ def _fetch_messages(conn, uids: list) -> list:
     return results
 
 
-def yandex_read_inbox(count: int = 10) -> str:
-    """Read the latest N messages from Yandex Mail inbox.
+def _format_messages(messages: list, header: str, preview_len: int = 250) -> str:
+    """Format a list of message dicts into readable text."""
+    lines = [header, ""]
+    for i, m in enumerate(messages, 1):
+        lines.append(f"{i}. [{m['date']}] {m['from']}")
+        lines.append(f"   Тема: {m['subject']}")
+        if m["preview"]:
+            lines.append(f"   Превью: {m['preview'][:preview_len]}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
-    Args:
-        count: Number of messages to fetch (default 10, max 50).
 
-    Returns:
-        Formatted list of messages with sender, subject, date, and preview.
-    """
-    count = min(int(count), 50)
+# ---------------------------------------------------------------------------
+# Tool implementations
+# ---------------------------------------------------------------------------
+
+def _yandex_read_inbox(ctx: ToolContext, count: int = 10) -> str:
+    """Read the latest N messages from Yandex Mail inbox."""
+    count = max(1, min(int(count), 50))
     try:
         conn = _connect()
         conn.select("INBOX")
         status, data = conn.uid("search", None, "ALL")
         if status != "OK" or not data[0]:
             conn.logout()
-            return "Inbox is empty or could not be read."
+            return "Входящие пусты или недоступны."
         all_uids = data[0].split()
-        # Take the last N
-        uids = all_uids[-count:]
-        uids.reverse()  # newest first
+        uids = list(reversed(all_uids[-count:]))  # newest first
         messages = _fetch_messages(conn, uids)
         conn.logout()
-
         if not messages:
-            return "No messages found."
-
-        lines = [f"📬 Last {len(messages)} messages from inbox:\n"]
-        for i, m in enumerate(messages, 1):
-            lines.append(
-                f"{i}. [{m['date']}] {m['from']}\n"
-                f"   Subject: {m['subject']}\n"
-                f"   Preview: {m['preview'][:200]}\n"
-            )
-        return "\n".join(lines)
+            return "Писем не найдено."
+        return _format_messages(
+            messages,
+            header=f"📬 Последние {len(messages)} писем из входящих:"
+        )
     except Exception as e:
-        return f"Error reading inbox: {e}"
+        return f"Ошибка чтения почты: {e}"
 
 
-def yandex_search_mail(
+def _yandex_search_mail(
+    ctx: ToolContext,
     query: str = "",
     from_addr: str = "",
     subject: str = "",
     since: str = "",
     limit: int = 20,
 ) -> str:
-    """Search Yandex Mail by various criteria.
-
-    Args:
-        query: Free-text search in body/subject (IMAP TEXT search).
-        from_addr: Filter by sender address/name.
-        subject: Filter by subject keywords.
-        since: Date filter in format 'DD-Mon-YYYY' (e.g. '01-Jan-2026').
-        limit: Max results to return (default 20, max 50).
-
-    Returns:
-        Formatted list of matching messages.
-    """
-    limit = min(int(limit), 50)
+    """Search Yandex Mail by sender, subject, text, or date."""
+    limit = max(1, min(int(limit), 50))
     try:
         conn = _connect()
         conn.select("INBOX")
 
         # Build IMAP search criteria
-        criteria = []
+        criteria: list[str] = []
         if from_addr:
             criteria.append(f'FROM "{from_addr}"')
         if subject:
             criteria.append(f'SUBJECT "{subject}"')
         if since:
-            criteria.append(f'SINCE {since}')
+            # Expected format: DD-Mon-YYYY (e.g. 01-Jan-2026)
+            criteria.append(f"SINCE {since}")
         if query:
             criteria.append(f'TEXT "{query}"')
         if not criteria:
@@ -172,67 +175,101 @@ def yandex_search_mail(
         status, data = conn.uid("search", None, search_str)
         if status != "OK" or not data[0]:
             conn.logout()
-            return "No messages found matching your criteria."
+            return "Писем по вашим критериям не найдено."
 
         all_uids = data[0].split()
-        # Most recent first
-        uids = all_uids[-limit:]
-        uids.reverse()
-
+        uids = list(reversed(all_uids[-limit:]))  # newest first
         messages = _fetch_messages(conn, uids)
         conn.logout()
 
         if not messages:
-            return "No messages found."
+            return "Писем не найдено."
 
-        lines = [f"🔍 Found {len(messages)} message(s):\n"]
-        for i, m in enumerate(messages, 1):
-            lines.append(
-                f"{i}. [{m['date']}] {m['from']}\n"
-                f"   Subject: {m['subject']}\n"
-                f"   Preview: {m['preview'][:300]}\n"
-            )
-        return "\n".join(lines)
+        parts = []
+        if from_addr:
+            parts.append(f"от: {from_addr}")
+        if subject:
+            parts.append(f"тема: {subject}")
+        if query:
+            parts.append(f"текст: {query}")
+        if since:
+            parts.append(f"с {since}")
+        criteria_str = ", ".join(parts) if parts else "все"
+
+        return _format_messages(
+            messages,
+            header=f"🔍 Найдено {len(messages)} писем ({criteria_str}):",
+            preview_len=300,
+        )
     except Exception as e:
-        return f"Error searching mail: {e}"
+        return f"Ошибка поиска по почте: {e}"
 
 
-def get_tools():
+# ---------------------------------------------------------------------------
+# Plugin registration
+# ---------------------------------------------------------------------------
+
+def get_tools() -> List[ToolEntry]:
     return [
-        {
-            "function": yandex_read_inbox,
-            "description": "Read the latest N messages from Yandex Mail inbox. Returns sender, subject, date, and message preview.",
-            "parameters": {
-                "count": {
-                    "type": "integer",
-                    "description": "Number of recent messages to fetch (default 10, max 50)",
-                }
-            },
-        },
-        {
-            "function": yandex_search_mail,
-            "description": "Search Yandex Mail by sender, subject, text, or date. Returns matching messages with preview.",
-            "parameters": {
-                "query": {
-                    "type": "string",
-                    "description": "Free-text search in body/subject",
-                },
-                "from_addr": {
-                    "type": "string",
-                    "description": "Filter by sender address or name",
-                },
-                "subject": {
-                    "type": "string",
-                    "description": "Filter by subject keywords",
-                },
-                "since": {
-                    "type": "string",
-                    "description": "Date filter in format DD-Mon-YYYY (e.g. 01-Jan-2026)",
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Max number of results (default 20, max 50)",
+        ToolEntry(
+            name="yandex_read_inbox",
+            schema={
+                "name": "yandex_read_inbox",
+                "description": (
+                    "Read the latest N messages from Yandex Mail inbox. "
+                    "Returns sender, subject, date, and message preview for each."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "count": {
+                            "type": "integer",
+                            "description": "Number of recent messages to fetch (default 10, max 50)",
+                        },
+                    },
+                    "required": [],
                 },
             },
-        },
+            handler=_yandex_read_inbox,
+            timeout_sec=30,
+        ),
+        ToolEntry(
+            name="yandex_search_mail",
+            schema={
+                "name": "yandex_search_mail",
+                "description": (
+                    "Search Yandex Mail by sender, subject, free text, or date. "
+                    "Returns matching messages with preview. All parameters are optional — "
+                    "at least one filter is recommended."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Free-text search in body/subject (IMAP TEXT)",
+                        },
+                        "from_addr": {
+                            "type": "string",
+                            "description": "Filter by sender email address or name",
+                        },
+                        "subject": {
+                            "type": "string",
+                            "description": "Filter by subject keywords",
+                        },
+                        "since": {
+                            "type": "string",
+                            "description": "Date filter in format DD-Mon-YYYY (e.g. 01-Jan-2026)",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max number of results (default 20, max 50)",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            handler=_yandex_search_mail,
+            timeout_sec=30,
+        ),
     ]
