@@ -426,6 +426,88 @@ def _normalize_subject(subject: str) -> str:
     return s
 
 
+
+# ---------------------------------------------------------------------------
+# LLM client (for smart reclassification)
+# ---------------------------------------------------------------------------
+_llm_client = None
+
+def _get_llm():
+    global _llm_client
+    if _llm_client is None:
+        try:
+            from ouroboros.llm import LLMClient
+            _llm_client = LLMClient()
+        except Exception:
+            pass
+    return _llm_client
+
+
+def _llm_reclassify_reds(red_candidates: list[dict]) -> list[dict]:
+    """Use LLM to filter out messages that do NOT actually require a response.
+    
+    Returns only those messages that genuinely require owner's action.
+    If LLM is unavailable, returns all candidates unchanged.
+    """
+    if not red_candidates:
+        return []
+    
+    client = _get_llm()
+    if client is None:
+        return red_candidates
+    
+    # Build batch classification prompt
+    items = []
+    for i, m in enumerate(red_candidates):
+        items.append(
+            f"{i+1}. От: {m['from']} | Тема: {m['subject']} | "
+            f"Превью: {m['preview'][:300]}"
+        )
+    
+    prompt = (
+        "Ты помощник по управлению почтой для делового человека.\n"
+        "Ниже список писем, которые предварительно помечены как требующие ответа.\n"
+        "Определи, какие из них ДЕЙСТВИТЕЛЬНО требуют ответа или действия от владельца ящика,\n"
+        "а какие — это просто ответы на его запросы, отчёты, подтверждения, информирование,\n"
+        "которые не требуют ответного действия.\n\n"
+        "Примеры НЕ требующих ответа:\n"
+        "- Согласен / OK / Принято в ответ на поручение\n"
+        "- Подтверждение получения / выполнения задачи\n"
+        "- Информационный отчёт о статусе\n"
+        "- Время есть / Успеем\n\n"
+        "Отвечай ТОЛЬКО JSON-массивом номеров писем, которые требуют ответа/действия.\n"
+        "Пример: [1, 3, 5]\n\n"
+        "Письма:\n"
+        + "\n".join(items)
+    )
+    
+    try:
+        import json, re
+        msg, _usage = client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            model="google/gemini-2.0-flash-001",
+            max_tokens=300,
+            reasoning_effort="low",
+        )
+        text = ""
+        if isinstance(msg, dict):
+            content_val = msg.get("content", "")
+            if isinstance(content_val, str):
+                text = content_val
+            elif isinstance(content_val, list):
+                for part in content_val:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        text += part.get("text", "")
+        m = re.search(r"\[([\d,\s]*)\]", text)
+        if m:
+            indices = json.loads(m.group(0))
+            result = [red_candidates[i-1] for i in indices if 1 <= i <= len(red_candidates)]
+            return result
+    except Exception:
+        pass
+    
+    return red_candidates
+
 def _build_digest(
     messages: list[dict],
     rules: dict,
@@ -458,6 +540,9 @@ def _build_digest(
             yellow.append(msg)
         else:
             green.append(msg)
+
+    # LLM reclassification: filter out red messages that don't require action
+    red = _llm_reclassify_reds(red)
 
     # Check sent messages for unanswered assignments
     unanswered = []
