@@ -63,7 +63,6 @@ class BackgroundConsciousness:
         self._next_wakeup_sec: float = 3600.0
         self._observations: queue.Queue = queue.Queue()
         self._deferred_events: list = []
-        self._deferred_observations: list = []
 
         # Budget tracking
         self._bg_spent_usd: float = 0.0
@@ -118,29 +117,20 @@ class BackgroundConsciousness:
         self._paused = True
 
     def resume(self) -> None:
-        """Resume after task completes. Flush any deferred events and observations first."""
+        """Resume after task completes. Flush any deferred events first."""
         if self._deferred_events and self._event_queue is not None:
             for evt in self._deferred_events:
                 self._event_queue.put(evt)
             self._deferred_events.clear()
-        for obs in self._deferred_observations:
-            try:
-                self._observations.put_nowait(obs)
-            except queue.Full:
-                break
-        self._deferred_observations.clear()
         self._paused = False
         self._wakeup_event.set()
 
     def inject_observation(self, text: str) -> None:
-        """Push an event the consciousness should notice. Deferred if paused."""
-        if self._paused:
-            self._deferred_observations.append(text)
-        else:
-            try:
-                self._observations.put_nowait(text)
-            except queue.Full:
-                pass
+        """Push an event the consciousness should notice."""
+        try:
+            self._observations.put_nowait(text)
+        except queue.Full:
+            pass
 
     # -------------------------------------------------------------------
     # Main loop
