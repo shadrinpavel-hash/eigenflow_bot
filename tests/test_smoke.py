@@ -114,6 +114,9 @@ EXPECTED_TOOLS = [
     "compact_context",
     "list_available_tools",
     "enable_tools",
+    # Yandex Mail
+    "yandex_read_inbox",
+    "yandex_search_mail",
 ]
 
 
