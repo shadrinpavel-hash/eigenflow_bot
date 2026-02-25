@@ -177,4 +177,24 @@ async def tool_loop(
 
 
 # Compatibility alias expected by agent.py
-run_llm_loop = tool_loop
+
+
+# --- SYNC_WRAPPER_RUN_LLM_LOOP ---
+# Keep agent.py working even if tool_loop is async.
+def run_llm_loop(*, messages=None, prompt="", tools=None, model=None, **kwargs):
+    """Synchronous wrapper around async tool_loop.
+
+    Returns: (text, usage, llm_trace)
+    """
+    if tools is None:
+        tools = []
+    if prompt is None:
+        prompt = ""
+    res = asyncio.run(tool_loop(prompt=prompt, tools=tools, model=model, messages=messages, **kwargs))
+    if isinstance(res, dict):
+        text = res.get("text") or res.get("content") or res.get("final") or ""
+        usage = res.get("usage")
+        llm_trace = res.get("llm_trace")
+        return text, usage, llm_trace
+    # fallback
+    return str(res), None, None
