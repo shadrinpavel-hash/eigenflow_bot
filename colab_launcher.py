@@ -153,7 +153,9 @@ if YANDEX_APP_PASSWORD:
     os.environ["YANDEX_APP_PASSWORD"] = str(YANDEX_APP_PASSWORD)
 
 # Write session-local env file so subprocess workers can access secrets
-# (userdata.get() doesn't work in subprocess, but /tmp/ouroboros.env does)
+# (userdata.get() doesn't work in subprocess, but launcher-written env file does)
+SESSION_ENV_FILE = str(os.environ.get("OUROBOROS_SESSION_ENV_FILE", "/tmp/ouroboros.env"))
+os.environ["OUROBOROS_SESSION_ENV_FILE"] = SESSION_ENV_FILE
 try:
     _session_env = {}
     if YANDEX_EMAIL:
@@ -161,12 +163,12 @@ try:
     if YANDEX_APP_PASSWORD:
         _session_env["YANDEX_APP_PASSWORD"] = str(YANDEX_APP_PASSWORD)
     if _session_env:
-        with open("/tmp/ouroboros.env", "w") as _f:
+        with open(SESSION_ENV_FILE, "w") as _f:
             for _k, _v in _session_env.items():
                 _f.write(f"{_k}={_v}\n")
-        log.info(f"Session env written: {list(_session_env.keys())}")
+        log.info(f"Session env written to {SESSION_ENV_FILE}: {list(_session_env.keys())}")
 except Exception as _e:
-    log.warning(f"Could not write /tmp/ouroboros.env: {_e}")
+    log.warning(f"Could not write {SESSION_ENV_FILE}: {_e}")
 
 if str(ANTHROPIC_API_KEY or "").strip():
     ensure_claude_code_cli()

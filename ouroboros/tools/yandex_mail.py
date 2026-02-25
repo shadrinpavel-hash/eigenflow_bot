@@ -8,7 +8,8 @@ Tools:
 
 Credential resolution order (first non-empty wins):
   1. os.environ  — set by colab_launcher.py via userdata.get() before fork
-  2. /tmp/ouroboros.env — session env file written by launcher (subprocess fallback)
+  2. OUROBOROS_SESSION_ENV_FILE (default /tmp/ouroboros.env) —
+     session env file written by launcher (subprocess fallback)
   3. google.colab.userdata — works only in direct Jupyter kernel context
 """
 
@@ -27,6 +28,12 @@ from ouroboros.tools.registry import ToolContext, ToolEntry
 # ---------------------------------------------------------------------------
 # Credential helpers
 # ---------------------------------------------------------------------------
+
+
+def _session_env_file_path() -> str:
+    """Return path to launcher-written session env file."""
+    return os.environ.get("OUROBOROS_SESSION_ENV_FILE", "/tmp/ouroboros.env")
+
 
 def _load_env_file(path: str) -> dict:
     """Read key=value pairs from a file. Returns {} on error."""
@@ -54,10 +61,11 @@ def _resolve_credentials() -> tuple[str, str, list[str]]:
         sources.append("os.environ")
 
     if not email_addr or not password:
-        # Fallback 1: /tmp/ouroboros.env — written by colab_launcher.py from Jupyter kernel
-        env = _load_env_file("/tmp/ouroboros.env")
+        # Fallback 1: launcher-written env file (default /tmp/ouroboros.env)
+        session_env_path = _session_env_file_path()
+        env = _load_env_file(session_env_path)
         if (not email_addr and env.get("YANDEX_EMAIL")) or (not password and env.get("YANDEX_APP_PASSWORD")):
-            sources.append("/tmp/ouroboros.env")
+            sources.append(session_env_path)
         if not email_addr and env.get("YANDEX_EMAIL"):
             email_addr = env["YANDEX_EMAIL"]
             os.environ["YANDEX_EMAIL"] = email_addr

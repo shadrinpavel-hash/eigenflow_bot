@@ -39,22 +39,19 @@ def test_get_credentials_from_env(monkeypatch):
     assert password == "secret"
 
 
-def test_get_credentials_from_env_file(monkeypatch):
+def test_get_credentials_from_session_env_file(monkeypatch, tmp_path):
     monkeypatch.delenv("YANDEX_EMAIL", raising=False)
     monkeypatch.delenv("YANDEX_APP_PASSWORD", raising=False)
-    monkeypatch.setattr(
-        yandex_mail,
-        "_load_env_file",
-        lambda _path: {
-            "YANDEX_EMAIL": "file@yandex.ru",
-            "YANDEX_APP_PASSWORD": "file_secret",
-        },
-    )
 
-    email_addr, password = yandex_mail._get_credentials()
+    env_file = tmp_path / "ouroboros-session.env"
+    env_file.write_text("YANDEX_EMAIL=file@yandex.ru\nYANDEX_APP_PASSWORD=file_secret\n")
+    monkeypatch.setenv("OUROBOROS_SESSION_ENV_FILE", str(env_file))
+
+    email_addr, password, sources = yandex_mail._resolve_credentials()
 
     assert email_addr == "file@yandex.ru"
     assert password == "file_secret"
+    assert str(env_file) in sources
 
 
 def test_get_credentials_from_colab_userdata(monkeypatch):
