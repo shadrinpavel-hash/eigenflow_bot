@@ -1,323 +1,264 @@
-"""Yandex Mail integration via IMAP: read_inbox and search_mail."""
+"""Yandex Mail IMAP integration: read_inbox, search_mail.
 
-from __future__ import annotations
+Requires env vars:
+  YANDEX_EMAIL       — full email address (login@yandex.ru)
+  YANDEX_APP_PASSWORD — app password from Yandex ID → Security
+"""
 
 import email
-import email.header
 import imaplib
-import logging
 import os
-from datetime import datetime
+from email.header import decode_header
 from email.utils import parsedate_to_datetime
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
-from ouroboros.tools.registry import ToolContext, ToolEntry
-
-log = logging.getLogger(__name__)
 
 IMAP_HOST = "imap.yandex.ru"
 IMAP_PORT = 993
 
 
-def _get_credentials() -> tuple[str, str]:
-    """Read credentials from environment variables."""
-    login = os.environ.get("YANDEX_EMAIL", "")
-    password = os.environ.get("YANDEX_APP_PASSWORD", "")
-    if not login or not password:
-        raise ValueError("YANDEX_EMAIL or YANDEX_APP_PASSWORD not set in environment")
-    return login, password
+def _decode_str(value: str | bytes | None) -> str:
+    """Decode RFC 2047 encoded header value to plain string."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        chunks, _ = decode_header(value.decode("utf-8", errors="replace"))[0]
+        if isinstance(chunks, bytes):
+            return chunks.decode("utf-8", errors="replace")
+        return str(chunks)
+    parts = decode_header(value)
+    result = []
+    for chunk, charset in parts:
+        if isinstance(chunk, bytes):
+            result.append(chunk.decode(charset or "utf-8", errors="replace"))
+        else:
+            result.append(chunk)
+    return "".join(result)
 
 
 def _connect() -> imaplib.IMAP4_SSL:
-    login, password = _get_credentials()
-    mail = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
-    mail.login(login, password)
-    return mail
+    login = os.environ.get("YANDEX_EMAIL", "")
+    password = os.environ.get("YANDEX_APP_PASSWORD", "")
+    if not login or not password:
+        raise ValueError(
+            "YANDEX_EMAIL and YANDEX_APP_PASSWORD env vars must be set"
+        )
+    conn = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+    conn.login(login, password)
+    return conn
 
 
-def _decode_header_value(value: str) -> str:
-    """Decode RFC 2047 encoded header value."""
-    parts = email.header.decode_header(value)
-    decoded = []
-    for part, charset in parts:
-        if isinstance(part, bytes):
-            try:
-                decoded.append(part.decode(charset or "utf-8", errors="replace"))
-            except (LookupError, UnicodeDecodeError):
-                decoded.append(part.decode("utf-8", errors="replace"))
-        else:
-            decoded.append(part)
-    return "".join(decoded)
+def _fetch_message(conn: imaplib.IMAP4_SSL, uid: bytes) -> dict:
+    """Fetch and parse a single message by UID."""
+    _, data = conn.uid("fetch", uid, "(RFC822)")
+    raw = data[0][1] if data and data[0] else b""
+    msg = email.message_from_bytes(raw)
 
+    subject = _decode_str(msg.get("Subject", ""))
+    sender = _decode_str(msg.get("From", ""))
+    date_str = msg.get("Date", "")
+    try:
+        date = parsedate_to_datetime(date_str).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        date = date_str
 
-def _extract_text_body(msg: email.message.Message) -> str:
-    """Extract plain text body from email message."""
-    body_parts = []
+    # Extract text body (prefer plain text, fallback to html snippet)
+    body = ""
     if msg.is_multipart():
         for part in msg.walk():
-            content_type = part.get_content_type()
-            disposition = str(part.get("Content-Disposition", ""))
-            if content_type == "text/plain" and "attachment" not in disposition:
-                charset = part.get_content_charset() or "utf-8"
-                try:
-                    payload = part.get_payload(decode=True)
-                    if payload:
-                        body_parts.append(payload.decode(charset, errors="replace"))
-                except Exception:
-                    pass
+            ct = part.get_content_type()
+            if ct == "text/plain" and not body:
+                payload = part.get_payload(decode=True)
+                if payload:
+                    body = payload.decode(
+                        part.get_content_charset() or "utf-8", errors="replace"
+                    )
+                    break
     else:
-        charset = msg.get_content_charset() or "utf-8"
-        try:
-            payload = msg.get_payload(decode=True)
-            if payload:
-                body_parts.append(payload.decode(charset, errors="replace"))
-        except Exception:
-            pass
-    return "\n".join(body_parts).strip()
+        payload = msg.get_payload(decode=True)
+        if payload:
+            body = payload.decode(
+                msg.get_content_charset() or "utf-8", errors="replace"
+            )
 
-
-def _format_message(msg: email.message.Message, uid: str) -> Dict[str, Any]:
-    """Format email message as a dict."""
-    subject = _decode_header_value(msg.get("Subject", "(нет темы)"))
-    sender = _decode_header_value(msg.get("From", ""))
-    date_str = msg.get("Date", "")
-    message_id = msg.get("Message-ID", "")
-
-    # Parse date
-    try:
-        dt = parsedate_to_datetime(date_str)
-        date_formatted = dt.strftime("%Y-%m-%d %H:%M")
-    except Exception:
-        date_formatted = date_str
-
-    body = _extract_text_body(msg)
-    # Truncate long bodies for preview
-    preview = body[:500] + "..." if len(body) > 500 else body
+    # Truncate body for readability
+    body_preview = body.strip()[:300].replace("\n", " ")
 
     return {
-        "uid": uid,
-        "subject": subject,
+        "uid": uid.decode(),
+        "date": date,
         "from": sender,
-        "date": date_formatted,
-        "preview": preview,
-        "message_id": message_id,
+        "subject": subject,
+        "preview": body_preview,
     }
 
 
-def _read_inbox(ctx: ToolContext, count: int = 10, folder: str = "INBOX") -> str:
-    """Read recent emails from inbox."""
+def _format_messages(messages: list[dict]) -> str:
+    if not messages:
+        return "Писем не найдено."
+    lines = []
+    for i, m in enumerate(messages, 1):
+        lines.append(
+            f"{i}. [{m['date']}] От: {m['from']}\n"
+            f"   Тема: {m['subject']}\n"
+            f"   {m['preview']}"
+        )
+    return "\n\n".join(lines)
+
+
+def read_inbox(count: int = 10, folder: str = "INBOX") -> str:
+    """Read the latest N emails from Yandex Mail.
+
+    Args:
+        count: Number of latest messages to fetch (default: 10).
+        folder: Mailbox folder name (default: INBOX).
+
+    Returns:
+        Formatted list of messages with date, sender, subject, body preview.
+    """
     try:
-        mail = _connect()
-        try:
-            mail.select(folder)
-            # Search all messages, get last N UIDs
-            status, data = mail.uid("search", None, "ALL")
-            if status != "OK":
-                return f"⚠️ Failed to search mailbox: {status}"
+        conn = _connect()
+        conn.select(folder, readonly=True)
+        _, uids_raw = conn.uid("search", None, "ALL")
+        uids = uids_raw[0].split() if uids_raw and uids_raw[0] else []
+        # Take last N
+        uids = uids[-count:] if len(uids) > count else uids
+        uids = list(reversed(uids))  # newest first
 
-            uids = data[0].split()
-            if not uids:
-                return "📭 Нет писем в папке."
-
-            # Take last N
-            recent_uids = uids[-count:]
-            recent_uids.reverse()  # newest first
-
-            messages = []
-            for uid in recent_uids:
-                status, msg_data = mail.uid("fetch", uid, "(RFC822)")
-                if status != "OK" or not msg_data or not msg_data[0]:
-                    continue
-                raw = msg_data[0][1]
-                if isinstance(raw, bytes):
-                    msg = email.message_from_bytes(raw)
-                    messages.append(_format_message(msg, uid.decode()))
-
-            if not messages:
-                return "📭 Не удалось прочитать письма."
-
-            # Format output
-            lines = [f"📬 **{folder}** — последние {len(messages)} писем:\n"]
-            for i, m in enumerate(messages, 1):
-                lines.append(f"**{i}. {m['subject']}**")
-                lines.append(f"   От: {m['from']}")
-                lines.append(f"   Дата: {m['date']}")
-                if m["preview"]:
-                    preview_lines = m["preview"].replace("\r\n", "\n").replace("\r", "\n").split("\n")
-                    short = " ".join(l.strip() for l in preview_lines[:3] if l.strip())
-                    if short:
-                        lines.append(f"   Текст: {short[:200]}...")
-                lines.append("")
-
-            return "\n".join(lines)
-
-        finally:
-            try:
-                mail.logout()
-            except Exception:
-                pass
-
-    except ValueError as e:
-        return f"⚠️ {e}"
-    except imaplib.IMAP4.error as e:
-        return f"⚠️ IMAP ошибка: {e}"
+        messages = [_fetch_message(conn, uid) for uid in uids]
+        conn.logout()
+        return _format_messages(messages)
     except Exception as e:
-        log.warning("read_inbox failed", exc_info=True)
-        return f"⚠️ Ошибка: {repr(e)}"
+        return f"Ошибка при чтении почты: {e}"
 
 
-def _search_mail(
-    ctx: ToolContext,
-    query: str = "",
-    sender: str = "",
-    subject: str = "",
-    since: str = "",
+def search_mail(
+    query: str,
     folder: str = "INBOX",
-    limit: int = 20,
+    max_results: int = 10,
+    since: Optional[str] = None,
+    sender: Optional[str] = None,
 ) -> str:
-    """Search emails by various criteria."""
+    """Search Yandex Mail using IMAP SEARCH criteria.
+
+    Args:
+        query: Text to search in subject and body (uses IMAP TEXT criterion).
+        folder: Mailbox folder to search (default: INBOX).
+        max_results: Maximum number of results to return (default: 10).
+        since: Optional date filter, format DD-Mon-YYYY (e.g. '01-Jan-2026').
+        sender: Optional sender email filter (partial match via FROM criterion).
+
+    Returns:
+        Formatted list of matching messages.
+    """
     try:
-        mail = _connect()
-        try:
-            mail.select(folder)
+        conn = _connect()
+        conn.select(folder, readonly=True)
 
-            # Build IMAP search criteria
-            criteria = []
+        # Build IMAP search criteria
+        criteria = []
+        if since:
+            criteria += ["SINCE", since]
+        if sender:
+            criteria += ["FROM", sender]
+        if query:
+            criteria += ["TEXT", query]
 
-            if sender:
-                criteria.append(f'FROM "{sender}"')
+        if not criteria:
+            criteria = ["ALL"]
 
-            if subject or query:
-                search_term = subject or query
-                criteria.append(f'SUBJECT "{search_term}"')
+        # IMAP search requires charset for non-ASCII queries
+        has_non_ascii = any(
+            isinstance(c, str) and not c.isascii() for c in criteria
+        )
+        charset = "UTF-8" if has_non_ascii else None
 
-            if since:
-                try:
-                    dt = datetime.strptime(since, "%Y-%m-%d")
-                    imap_date = dt.strftime("%d-%b-%Y")
-                    criteria.append(f"SINCE {imap_date}")
-                except ValueError:
-                    pass
+        # Encode criteria for imaplib
+        encoded = []
+        for c in criteria:
+            if isinstance(c, str) and not c.isascii():
+                encoded.append(c.encode("utf-8"))
+            else:
+                encoded.append(c)
 
-            if not criteria:
-                criteria = ["ALL"]
+        if charset:
+            _, uids_raw = conn.uid("search", f"CHARSET {charset}", *encoded)
+        else:
+            _, uids_raw = conn.uid("search", None, *encoded)
 
-            search_str = " ".join(criteria)
-            status, data = mail.uid("search", None, search_str)
+        uids = uids_raw[0].split() if uids_raw and uids_raw[0] else []
+        uids = list(reversed(uids))  # newest first
+        uids = uids[:max_results]
 
-            if status != "OK":
-                return f"⚠️ Поиск не удался: {status}"
-
-            uids = data[0].split()
-            if not uids:
-                return f"🔍 Ничего не найдено по запросу: {search_str}"
-
-            # Take last `limit` results, newest first
-            selected = uids[-limit:]
-            selected.reverse()
-
-            messages = []
-            for uid in selected:
-                status, msg_data = mail.uid("fetch", uid, "(RFC822)")
-                if status != "OK" or not msg_data or not msg_data[0]:
-                    continue
-                raw = msg_data[0][1]
-                if isinstance(raw, bytes):
-                    msg = email.message_from_bytes(raw)
-                    messages.append(_format_message(msg, uid.decode()))
-
-            if not messages:
-                return "🔍 Не удалось получить найденные письма."
-
-            lines = [f"🔍 Найдено {len(uids)} писем, показаны последние {len(messages)}:\n"]
-            for i, m in enumerate(messages, 1):
-                lines.append(f"**{i}. {m['subject']}**")
-                lines.append(f"   От: {m['from']}")
-                lines.append(f"   Дата: {m['date']}")
-                if m["preview"]:
-                    preview_lines = m["preview"].replace("\r\n", "\n").replace("\r", "\n").split("\n")
-                    short = " ".join(l.strip() for l in preview_lines[:3] if l.strip())
-                    if short:
-                        lines.append(f"   Текст: {short[:200]}...")
-                lines.append("")
-
-            return "\n".join(lines)
-
-        finally:
-            try:
-                mail.logout()
-            except Exception:
-                pass
-
-    except ValueError as e:
-        return f"⚠️ {e}"
-    except imaplib.IMAP4.error as e:
-        return f"⚠️ IMAP ошибка: {e}"
+        messages = [_fetch_message(conn, uid) for uid in uids]
+        conn.logout()
+        return _format_messages(messages)
     except Exception as e:
-        log.warning("search_mail failed", exc_info=True)
-        return f"⚠️ Ошибка: {repr(e)}"
+        return f"Ошибка при поиске по почте: {e}"
 
 
-def get_tools() -> List[ToolEntry]:
+def get_tools() -> list[dict]:
     return [
-        ToolEntry("read_inbox", {
-            "name": "read_inbox",
-            "description": "Прочитать последние письма из Яндекс.Почты. Возвращает список с отправителем, темой, датой и кратким превью.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "count": {
-                        "type": "integer",
-                        "description": "Количество последних писем (по умолчанию 10)",
-                        "default": 10,
+        {
+            "type": "function",
+            "function": {
+                "name": "read_inbox",
+                "description": (
+                    "Read the latest emails from Yandex Mail inbox. "
+                    "Returns sender, date, subject, and body preview for each message."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "count": {
+                            "type": "integer",
+                            "description": "Number of latest messages to fetch (default: 10).",
+                        },
+                        "folder": {
+                            "type": "string",
+                            "description": "Mailbox folder name (default: INBOX).",
+                        },
                     },
-                    "folder": {
-                        "type": "string",
-                        "description": "Папка для чтения (по умолчанию INBOX)",
-                        "default": "INBOX",
-                    },
+                    "required": [],
                 },
-                "required": [],
             },
-        }, _read_inbox),
-        ToolEntry("search_mail", {
-            "name": "search_mail",
-            "description": "Поиск писем в Яндекс.Почте по отправителю, теме или дате.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Свободный текстовый поиск (ищет по теме письма)",
-                        "default": "",
+            "fn": read_inbox,
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_mail",
+                "description": (
+                    "Search Yandex Mail for messages matching a query. "
+                    "Supports filtering by text, sender, and date."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Text to search in subject and body.",
+                        },
+                        "folder": {
+                            "type": "string",
+                            "description": "Mailbox folder to search (default: INBOX).",
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Maximum number of results (default: 10).",
+                        },
+                        "since": {
+                            "type": "string",
+                            "description": "Date filter, format DD-Mon-YYYY (e.g. '01-Jan-2026').",
+                        },
+                        "sender": {
+                            "type": "string",
+                            "description": "Filter by sender email (partial match).",
+                        },
                     },
-                    "sender": {
-                        "type": "string",
-                        "description": "Фильтр по отправителю (email или имя)",
-                        "default": "",
-                    },
-                    "subject": {
-                        "type": "string",
-                        "description": "Фильтр по теме письма",
-                        "default": "",
-                    },
-                    "since": {
-                        "type": "string",
-                        "description": "Искать письма с этой даты (формат YYYY-MM-DD, например 2026-01-01)",
-                        "default": "",
-                    },
-                    "folder": {
-                        "type": "string",
-                        "description": "Папка для поиска (по умолчанию INBOX)",
-                        "default": "INBOX",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Максимальное количество результатов (по умолчанию 20)",
-                        "default": 20,
-                    },
+                    "required": ["query"],
                 },
-                "required": [],
             },
-        }, _search_mail),
+            "fn": search_mail,
+        },
     ]
