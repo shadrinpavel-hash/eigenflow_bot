@@ -179,22 +179,61 @@ async def tool_loop(
 # Compatibility alias expected by agent.py
 
 
-# --- SYNC_WRAPPER_RUN_LLM_LOOP ---
-# Keep agent.py working even if tool_loop is async.
-def run_llm_loop(*, messages=None, prompt="", tools=None, model=None, **kwargs):
-    """Synchronous wrapper around async tool_loop.
+
+
+# --- SYNC_WRAPPER_RUN_LLM_LOOP_CHAT ---
+# Fast-compat: use the new LLMClient.chat() directly (llm.py contract).
+def run_llm_loop(
+    *,
+    messages=None,
+    prompt="",
+    tools=None,
+    model=None,
+    llm=None,
+    reasoning_effort="medium",
+    max_tokens=16384,
+    tool_choice="auto",
+    **kwargs,
+):
+    """Synchronous wrapper used by agent.py.
 
     Returns: (text, usage, llm_trace)
+
+    NOTE (hotfix): This path does a single LLM call via LLMClient.chat().
+    Tool execution loop is intentionally bypassed to stop runtime crashes.
     """
+    if model is None or model == "":
+        model = os.environ.get("OUROBOROS_MODEL") or "openai/gpt-4o-mini"
+
     if tools is None:
         tools = []
-    if prompt is None:
-        prompt = ""
-    res = asyncio.run(tool_loop(prompt=prompt, tools=tools, model=model, messages=messages, **kwargs))
-    if isinstance(res, dict):
-        text = res.get("text") or res.get("content") or res.get("final") or ""
-        usage = res.get("usage")
-        llm_trace = res.get("llm_trace")
-        return text, usage, llm_trace
-    # fallback
-    return str(res), None, None
+
+    # Build messages
+    if messages is None:
+        messages = []
+        if prompt:
+            messages = [{"role": "user", "content": prompt}]
+    if not messages and prompt:
+        messages = [{"role": "user", "content": prompt}]
+
+    # Prefer injected client
+    if llm is None:
+        from ouroboros.llm import LLMClient
+        llm = LLMClient()
+
+    msg, usage = llm.chat(
+        messages=messages,
+        model=model,
+        tools=tools,
+        reasoning_effort=reasoning_effort,
+        max_tokens=max_tokens,
+        tool_choice=tool_choice,
+    )
+
+    # Extract text
+    text = msg.get("content") or ""
+    # If model requested tool calls, surface a minimal note (no crash)
+    if msg.get("tool_calls"):
+        text = (text + "\n\n⚠️ Tool calls were requested, but tool execution is disabled in this hotfix.").strip()
+
+    return text, usage, None
