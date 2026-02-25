@@ -3,6 +3,11 @@
 Builds a 🔴/🟡/🟢 digest of recent emails using rules from
 /content/drive/MyDrive/Ouroboros/memory/email_topics.md.
 
+Classification:
+  🔴 red    — requires attention (important sender to:me, flagged, urgency)
+  🟡 yellow — project topic mention (ST Luce, БФК, etc.) regardless of To/Cc
+  🟢 green  — informational, everything else
+
 Tools:
   email_digest — generate classified email digest for a time window
 """
@@ -11,6 +16,7 @@ from __future__ import annotations
 import imaplib
 import email
 import os
+import pathlib
 import re
 from datetime import datetime, timedelta, timezone
 from email.header import decode_header
@@ -86,7 +92,12 @@ def _should_ignore(from_addr: str, rules: dict) -> bool:
 
 
 def _classify(msg: dict, rules: dict, owner_email: str) -> str:
-    """Return 'red', 'yellow', or 'green' classification."""
+    """Return 'red', 'yellow', or 'green' classification.
+
+    red    — requires attention (important sender to:me, flagged, urgency)
+    yellow — project topic mention (ST Luce, БФК, etc.) regardless of To/Cc
+    green  — everything else (informational)
+    """
     from_addr = msg.get("from", "").lower()
     to_addr = msg.get("to", "").lower()
     subject = msg.get("subject", "").lower()
@@ -95,28 +106,28 @@ def _classify(msg: dict, rules: dict, owner_email: str) -> str:
     text_bucket = subject + " " + preview
     owner = owner_email.lower()
 
-    # Red: flagged Important OR important sender in To (not Cc)
+    # Red: flagged Important
     if is_flagged:
         return "red"
+    # Red: important sender where owner is in To (not Cc)
     for sender in rules["important_senders"]:
         if sender in from_addr and owner in to_addr:
             return "red"
-
     # Red: urgency keywords
     for kw in rules["urgency_keywords"]:
         if kw in text_bucket:
             return "red"
 
-    # Green with topic mention = still green (informational)
+    # Yellow: project topic mentioned — always in digest regardless of To/Cc
     for topic in rules["topics"]:
         if topic in text_bucket:
-            return "green"
+            return "yellow"
 
     return "green"
 
 
 # ---------------------------------------------------------------------------
-# IMAP helpers (duplicated here to keep module self-contained)
+# IMAP helpers
 # ---------------------------------------------------------------------------
 
 def _get_credentials() -> tuple[str, str]:
@@ -225,7 +236,6 @@ def _fetch_since(hours: int) -> list[dict]:
         date_raw = msg.get("Date", "")
         try:
             date_dt = parsedate_to_datetime(date_raw)
-            # Filter strictly by hours (SINCE is date-only in IMAP)
             if date_dt < since_dt:
                 continue
             date_str = (date_dt + MSK_OFFSET).strftime("%d.%m %H:%M")
@@ -252,7 +262,7 @@ def _fetch_since(hours: int) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _build_digest(messages: list[dict], rules: dict, owner_email: str, hours: int) -> str:
-    red, green = [], []
+    red, yellow, green = [], [], []
     skipped = 0
 
     for msg in messages:
@@ -262,6 +272,8 @@ def _build_digest(messages: list[dict], rules: dict, owner_email: str, hours: in
         cls = _classify(msg, rules, owner_email)
         if cls == "red":
             red.append(msg)
+        elif cls == "yellow":
+            yellow.append(msg)
         else:
             green.append(msg)
 
@@ -273,7 +285,7 @@ def _build_digest(messages: list[dict], rules: dict, owner_email: str, hours: in
     ]
 
     if red:
-        lines.append(f"🔴 ТРЕБУЮТ ВНИМАНИЯ ({len(red)}):")
+        lines.append(f"🔴 ТРЕБУЮТ ОТВЕТА ({len(red)}):")
         lines.append("")
         for m in red:
             lines.append(f"  [{m['date']}] {m['from']}")
@@ -282,7 +294,20 @@ def _build_digest(messages: list[dict], rules: dict, owner_email: str, hours: in
                 lines.append(f"  {m['preview'][:200]}")
             lines.append("")
     else:
-        lines.append("🔴 Срочных / важных писем нет.")
+        lines.append("🔴 Срочных писем нет.")
+        lines.append("")
+
+    if yellow:
+        lines.append(f"🟡 ПО ПРОЕКТАМ ({len(yellow)}):")
+        lines.append("")
+        for m in yellow:
+            lines.append(f"  [{m['date']}] {m['from']}")
+            lines.append(f"  Тема: {m['subject']}")
+            if m["preview"]:
+                lines.append(f"  {m['preview'][:200]}")
+            lines.append("")
+    else:
+        lines.append("🟡 По проектам — нет.")
         lines.append("")
 
     if green:
@@ -302,13 +327,14 @@ def _build_digest(messages: list[dict], rules: dict, owner_email: str, hours: in
 # Tool
 # ---------------------------------------------------------------------------
 
-import pathlib
-
 def _email_digest(ctx: ToolContext, hours: int = 5) -> str:
     """Generate a classified email digest for the last N hours.
 
     Reads rules from email_topics.md (topics, important senders, ignore list).
-    Classifies each email as 🔴 (requires attention) or 🟢 (for info).
+    Classifies each email as:
+      🔴 red    — requires attention
+      🟡 yellow — project topic (ST Luce, БФК, etc.), regardless of To/Cc
+      🟢 green  — informational
 
     Args:
         hours: How many hours back to scan (default 5, use 19 for morning digest).
@@ -337,7 +363,8 @@ def get_tools() -> list[ToolEntry]:
             name="email_digest",
             description=(
                 "Generate a classified email digest for the last N hours. "
-                "Classifies emails as 🔴 (requires attention) or 🟢 (for info) "
+                "Classifies emails as 🔴 (requires attention), "
+                "🟡 (project topic — ST Luce, БФК, etc.), or 🟢 (informational) "
                 "based on email_topics.md rules."
             ),
             parameters={
