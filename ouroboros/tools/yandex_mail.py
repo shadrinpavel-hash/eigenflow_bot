@@ -1,15 +1,14 @@
 """Yandex Mail IMAP tools — read inbox and search mail.
 
 Tools:
-  yandex_read_inbox      — fetch the latest N messages from INBOX
-  yandex_search_mail     — search by sender, subject, text, date range
-  yandex_check_credentials — verify credentials and test IMAP connection
+  yandex_read_inbox        — fetch the latest N messages from INBOX
+  yandex_search_mail       — search by sender, subject, text, date range
+  yandex_check_credentials — verify secrets are available and test connection
 
-Credential loading order (most to least preferred):
-  1. os.environ — inherited from colab_launcher via fork()
-  2. google.colab.userdata — works when called from Jupyter kernel context
-  3. /tmp/ouroboros.env — session-local file written by colab_launcher at startup
-  4. /content/drive/.../secrets.env — last resort (not written by default)
+Credential resolution order (first non-empty wins):
+  1. os.environ  — set by colab_launcher.py via userdata.get() before fork
+  2. /tmp/ouroboros.env — session env file written by launcher (subprocess fallback)
+  3. google.colab.userdata — works only in direct Jupyter kernel context
 """
 
 from __future__ import annotations
@@ -24,17 +23,17 @@ from typing import List, Optional
 from ouroboros.tools.registry import ToolContext, ToolEntry
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Credential helpers
 # ---------------------------------------------------------------------------
 
 def _load_env_file(path: str) -> dict:
-    """Parse a KEY=VALUE env file. Returns dict of found keys."""
+    """Read key=value pairs from a file. Returns {} on error."""
     result = {}
     try:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
+                if "=" not in line or line.startswith("#"):
                     continue
                 key, _, val = line.partition("=")
                 result[key.strip()] = val.strip()
@@ -46,56 +45,39 @@ def _load_env_file(path: str) -> dict:
 def _get_credentials() -> tuple[str, str]:
     """Read YANDEX_EMAIL and YANDEX_APP_PASSWORD.
 
-    Tries multiple sources in order, caching results in os.environ
-    so subsequent calls are cheap.
-
-    Priority:
-    1. os.environ — fastest; set by colab_launcher and inherited via fork()
-    2. google.colab.userdata — works when code runs in a Jupyter kernel cell
-    3. /tmp/ouroboros.env — written by colab_launcher at startup for subprocess access
-    4. Drive secrets.env — last resort (plaintext on Drive, not written by default)
+    Tries multiple sources in priority order so the tool works both when
+    called from a forked worker (os.environ inherited from launcher) and
+    from a fresh subprocess that can't use google.colab.userdata directly.
     """
     email_addr = os.environ.get("YANDEX_EMAIL", "").strip()
     password = os.environ.get("YANDEX_APP_PASSWORD", "").strip()
 
-    # --- Fallback 2: google.colab.userdata ---
-    # Works when the call context is a Jupyter kernel (not subprocess workers).
     if not email_addr or not password:
+        # Fallback 1: /tmp/ouroboros.env — written by colab_launcher.py from Jupyter kernel
+        env = _load_env_file("/tmp/ouroboros.env")
+        if not email_addr and env.get("YANDEX_EMAIL"):
+            email_addr = env["YANDEX_EMAIL"]
+            os.environ["YANDEX_EMAIL"] = email_addr
+        if not password and env.get("YANDEX_APP_PASSWORD"):
+            password = env["YANDEX_APP_PASSWORD"]
+            os.environ["YANDEX_APP_PASSWORD"] = password
+
+    if not email_addr or not password:
+        # Fallback 2: google.colab.userdata (works only inside Jupyter kernel)
         try:
             from google.colab import userdata  # type: ignore
             if not email_addr:
-                email_addr = (userdata.get("YANDEX_EMAIL") or "").strip()
+                v = (userdata.get("YANDEX_EMAIL") or "").strip()
+                if v:
+                    email_addr = v
+                    os.environ["YANDEX_EMAIL"] = v
             if not password:
-                password = (userdata.get("YANDEX_APP_PASSWORD") or "").strip()
-            if email_addr:
-                os.environ["YANDEX_EMAIL"] = email_addr
-            if password:
-                os.environ["YANDEX_APP_PASSWORD"] = password
+                v = (userdata.get("YANDEX_APP_PASSWORD") or "").strip()
+                if v:
+                    password = v
+                    os.environ["YANDEX_APP_PASSWORD"] = v
         except Exception:
             pass
-
-    # --- Fallback 3: /tmp/ouroboros.env ---
-    # Written by colab_launcher.py at startup with the secrets it read from userdata.
-    # This is the reliable path for subprocess workers that inherit env from fork().
-    if not email_addr or not password:
-        env_data = _load_env_file("/tmp/ouroboros.env")
-        if not email_addr and "YANDEX_EMAIL" in env_data:
-            email_addr = env_data["YANDEX_EMAIL"]
-            os.environ["YANDEX_EMAIL"] = email_addr
-        if not password and "YANDEX_APP_PASSWORD" in env_data:
-            password = env_data["YANDEX_APP_PASSWORD"]
-            os.environ["YANDEX_APP_PASSWORD"] = password
-
-    # --- Fallback 4: secrets.env on Drive ---
-    # Legacy / last resort. Not written by default (would be plaintext).
-    if not email_addr or not password:
-        env_data = _load_env_file("/content/drive/MyDrive/Ouroboros/secrets.env")
-        if not email_addr and "YANDEX_EMAIL" in env_data:
-            email_addr = env_data["YANDEX_EMAIL"]
-            os.environ["YANDEX_EMAIL"] = email_addr
-        if not password and "YANDEX_APP_PASSWORD" in env_data:
-            password = env_data["YANDEX_APP_PASSWORD"]
-            os.environ["YANDEX_APP_PASSWORD"] = password
 
     return email_addr, password
 
@@ -212,7 +194,7 @@ def _yandex_read_inbox(ctx: ToolContext, count: int = 10) -> str:
             return "Писем не найдено."
         return _format_messages(
             messages,
-            header=f"📬 Последние {len(messages)} писем из входящих:"
+            header=f"📬 Последние {len(messages)} писем из входящих:",
         )
     except Exception as e:
         return f"Ошибка чтения почты: {e}"
@@ -284,33 +266,24 @@ def _yandex_check_credentials(ctx: ToolContext) -> str:
     """Check if Yandex Mail credentials are available and test the IMAP connection."""
     email_addr, password = _get_credentials()
 
-    # Show which sources are available for diagnostics
+    # Diagnose what's available and from where
     sources = []
     if os.environ.get("YANDEX_EMAIL"):
         sources.append("os.environ")
-    try:
-        from google.colab import userdata  # type: ignore
-        if (userdata.get("YANDEX_EMAIL") or "").strip():
-            sources.append("colab.userdata")
-    except Exception:
-        pass
-    import pathlib
-    if pathlib.Path("/tmp/ouroboros.env").exists():
-        env_data = _load_env_file("/tmp/ouroboros.env")
-        if "YANDEX_EMAIL" in env_data:
+    elif os.path.exists("/tmp/ouroboros.env"):
+        env = _load_env_file("/tmp/ouroboros.env")
+        if env.get("YANDEX_EMAIL"):
             sources.append("/tmp/ouroboros.env")
 
     if not email_addr:
         return (
-            f"❌ YANDEX_EMAIL не найден ни в одном источнике.\n"
-            f"Добавь в Colab Secrets → включи Notebook Access → перезапусти агента."
+            "❌ YANDEX_EMAIL не найден.\n"
+            "Добавь в Colab Secrets с включённым Notebook Access, затем перезапусти агента."
         )
     if not password:
-        return (
-            f"❌ YANDEX_APP_PASSWORD не найден. Email найден: {email_addr}\n"
-            f"Источники: {', '.join(sources) or 'нет'}"
-        )
+        return f"❌ YANDEX_APP_PASSWORD не найден. Email найден: {email_addr}"
 
+    source_info = f" (из {', '.join(sources)})" if sources else ""
     try:
         conn = _connect()
         conn.select("INBOX")
@@ -318,16 +291,12 @@ def _yandex_check_credentials(ctx: ToolContext) -> str:
         total = len(data[0].split()) if status == "OK" and data[0] else 0
         conn.logout()
         return (
-            f"✅ Подключение успешно.\n"
+            f"✅ Подключение успешно{source_info}.\n"
             f"Email: {email_addr}\n"
-            f"Источник: {', '.join(sources) or 'неизвестен'}\n"
-            f"Всего писем в INBOX: {total}."
+            f"Писем в INBOX: {total}"
         )
     except Exception as e:
-        return (
-            f"❌ Ошибка подключения к imap.yandex.ru: {e}\n"
-            f"Email: {email_addr} | Источник: {', '.join(sources) or 'нет'}"
-        )
+        return f"❌ Ошибка подключения к imap.yandex.ru{source_info}: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +372,7 @@ def get_tools() -> List[ToolEntry]:
                 "name": "yandex_check_credentials",
                 "description": (
                     "Check if Yandex Mail credentials (YANDEX_EMAIL and YANDEX_APP_PASSWORD) "
-                    "are available and test the IMAP connection. Use this to diagnose credential issues."
+                    "are available and test the IMAP connection. Use this to diagnose issues."
                 ),
                 "parameters": {
                     "type": "object",
