@@ -245,11 +245,6 @@ def init_state() -> Dict[str, Any]:
 TOTAL_BUDGET_LIMIT: float = 0.0
 EVOLUTION_BUDGET_RESERVE: float = 50.0  # Stop evolution when remaining < this
 
-# Low-budget warning thresholds (USD remaining). One warning per threshold per session.
-LOW_BUDGET_THRESHOLDS: list = [5.0, 2.0, 1.0]
-_low_budget_warned: set = set()  # thresholds already warned (cleared on restart)
-
-
 
 def set_budget_limit(limit: float) -> None:
     """Set total budget limit for budget_pct calculation."""
@@ -304,27 +299,6 @@ def budget_pct(st: Dict[str, Any]) -> float:
     return (spent / total) * 100.0
 
 
-def _check_low_budget_warning(remaining: float, owner_chat_id: Optional[int]) -> None:
-    """Send a Telegram warning if budget crosses a threshold. One message per threshold."""
-    global _low_budget_warned
-    if owner_chat_id is None:
-        return
-    for threshold in sorted(LOW_BUDGET_THRESHOLDS, reverse=True):  # biggest first
-        if remaining <= threshold and threshold not in _low_budget_warned:
-            _low_budget_warned.add(threshold)
-            try:
-                from supervisor.telegram import send_telegram_message
-                msg = (
-                    f"⚠️ *Внимание: бюджет заканчивается!*"
-                    f" Осталось *${remaining:.2f}* из ${TOTAL_BUDGET_LIMIT:.0f}."
-                    f" Пополни бюджет в Google Colab, иначе я замолчу."
-                )
-                send_telegram_message(owner_chat_id, msg, parse_mode="Markdown")
-                log.warning("Low budget warning sent: $%.2f remaining (threshold $%.2f)", remaining, threshold)
-            except Exception as exc:
-                log.error("Failed to send low budget warning: %s", exc)
-            break  # one warning per call, next threshold on next budget update
-
 def update_budget_from_usage(usage: Dict[str, Any]) -> None:
     """Update state with LLM usage costs and tokens.
 
@@ -348,8 +322,6 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
             return default
 
     # Step 1: Update budget counters under lock (fast, no I/O beyond Drive)
-    _remaining: float = -1.0  # sentinel: means lock failed before computing
-    _owner_chat_id: Optional[int] = None
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)
     try:
         st = _load_state_unlocked()
@@ -367,15 +339,8 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
             usage.get("cached_tokens") if isinstance(usage, dict) else 0)
         should_check_ground_truth = (st["spent_calls"] % 50 == 0)
         _save_state_unlocked(st)
-        # Capture values for low-budget check outside the lock
-        _remaining = budget_remaining(st)
-        _owner_chat_id = int(st.get("owner_chat_id") or 0) or None
     finally:
         release_file_lock(STATE_LOCK_PATH, lock_fd)
-
-    # Step 1.5: Low-budget warning (outside lock, may call Telegram)
-    if _remaining >= 0:  # skip if lock failed before we computed it
-        _check_low_budget_warning(_remaining, _owner_chat_id)
 
     # Step 2: HTTP to OpenRouter OUTSIDE the lock (can take up to 10s)
     if should_check_ground_truth:
