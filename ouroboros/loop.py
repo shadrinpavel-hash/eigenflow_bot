@@ -45,9 +45,26 @@ async def tool_loop(
     model: str,
     max_rounds: int = MAX_ROUNDS,
     chat_history: list[dict] | None = None,
+    messages: list[dict] | None = None,
     available_budget: float = 1000000,  # effectively unlimited
 ) -> Dict[str, Any]:
     logging.info(f"Starting tool loop with model={model}")
+
+    # Backward-compat: older callers pass messages=
+    if messages and (prompt is None or prompt == ""):
+        try:
+            last_user_idx = None
+            for i in range(len(messages) - 1, -1, -1):
+                m = messages[i]
+                if isinstance(m, dict) and m.get("role") == "user" and m.get("content"):
+                    last_user_idx = i
+                    break
+            if last_user_idx is not None:
+                prompt = messages[last_user_idx].get("content")
+                if chat_history is None:
+                    chat_history = messages[:last_user_idx]
+        except Exception:
+            pass
 
     fallback_model = "openai/gpt-4o-mini" if model in (
         "google/gemini-2.0-flash-001", "google/gemini-2.5-flash-lite"
