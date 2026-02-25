@@ -63,6 +63,7 @@ class BackgroundConsciousness:
         self._next_wakeup_sec: float = 3600.0
         self._observations: queue.Queue = queue.Queue()
         self._deferred_events: list = []
+        self._deferred_observations: list = []
 
         # Budget tracking
         self._bg_spent_usd: float = 0.0
@@ -81,12 +82,17 @@ class BackgroundConsciousness:
     @property
     def _model(self) -> str:
         model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
-        # Safety: never use expensive pro models for background consciousness
         model_lower = model.lower()
-        if ("gemini-3" in model_lower or
-                ("gemini" in model_lower and "pro" in model_lower and "flash" not in model_lower)):
-            log.info("Background model '%s' is expensive, overriding to gemini-2.5-flash-lite", model)
-            return "google/gemini-2.5-flash-lite"
+        # Never use expensive models for background consciousness
+        expensive_patterns = [
+            "claude", "sonnet", "opus", "gpt-4", "o1", "o3",
+            "gemini-2.5-pro", "gemini-3", "gemini-pro"
+        ]
+        is_cheap = any(p in model_lower for p in ["flash", "mini", "haiku", "lite"])
+        is_expensive = any(p in model_lower for p in expensive_patterns)
+        if is_expensive and not is_cheap:
+            log.warning("Background model '%s' is expensive, overriding to gemini-2.0-flash-001", model)
+            return "google/gemini-2.0-flash-001"
         return model
 
     def start(self) -> str:
@@ -112,20 +118,29 @@ class BackgroundConsciousness:
         self._paused = True
 
     def resume(self) -> None:
-        """Resume after task completes. Flush any deferred events first."""
+        """Resume after task completes. Flush any deferred events and observations first."""
         if self._deferred_events and self._event_queue is not None:
             for evt in self._deferred_events:
                 self._event_queue.put(evt)
             self._deferred_events.clear()
+        for obs in self._deferred_observations:
+            try:
+                self._observations.put_nowait(obs)
+            except queue.Full:
+                break
+        self._deferred_observations.clear()
         self._paused = False
         self._wakeup_event.set()
 
     def inject_observation(self, text: str) -> None:
-        """Push an event the consciousness should notice."""
-        try:
-            self._observations.put_nowait(text)
-        except queue.Full:
-            pass
+        """Push an event the consciousness should notice. Deferred if paused."""
+        if self._paused:
+            self._deferred_observations.append(text)
+        else:
+            try:
+                self._observations.put_nowait(text)
+            except queue.Full:
+                pass
 
     # -------------------------------------------------------------------
     # Main loop
@@ -166,7 +181,8 @@ class BackgroundConsciousness:
     def _check_budget(self) -> bool:
         """Check if background consciousness is within its budget allocation."""
         try:
-            total_budget = float(os.environ.get("TOTAL_BUDGET", "1"))
+            total_budget_str = os.environ.get("TOTAL_BUDGET", "").strip()
+            total_budget = float(total_budget_str) if total_budget_str else 200.0
             if total_budget <= 0:
                 return True
             max_bg = total_budget * (self._bg_budget_pct / 100.0)
@@ -315,15 +331,29 @@ class BackgroundConsciousness:
 
         # Identity
         identity_path = self._drive_root / "memory" / "identity.md"
+        log.debug("[context] reading identity from %s (exists=%s)", identity_path, identity_path.exists())
         if identity_path.exists():
-            parts.append("## Identity\n\n" + clip_text(
-                read_text(identity_path), 6000))
+            identity_text = read_text(identity_path)
+            log.debug("[context] identity read: %d chars", len(identity_text))
+            if not identity_text.strip():
+                log.warning("[context] identity.md is EMPTY — skipping")
+            else:
+                parts.append("## Identity\n\n" + clip_text(identity_text, 6000))
+        else:
+            log.warning("[context] identity.md NOT FOUND at %s", identity_path)
 
         # Scratchpad
         scratchpad_path = self._drive_root / "memory" / "scratchpad.md"
+        log.debug("[context] reading scratchpad from %s (exists=%s)", scratchpad_path, scratchpad_path.exists())
         if scratchpad_path.exists():
-            parts.append("## Scratchpad\n\n" + clip_text(
-                read_text(scratchpad_path), 8000))
+            scratchpad_text = read_text(scratchpad_path)
+            log.debug("[context] scratchpad read: %d chars", len(scratchpad_text) if scratchpad_text else 0)
+            if not scratchpad_text or not scratchpad_text.strip():
+                log.warning("[context] scratchpad.md is EMPTY — skipping")
+            else:
+                parts.append("## Scratchpad\n\n" + clip_text(scratchpad_text, 8000))
+        else:
+            log.warning("[context] scratchpad.md NOT FOUND at %s", scratchpad_path)
 
         # Dialogue summary for continuity
         summary_path = self._drive_root / "memory" / "dialogue_summary.md"
@@ -353,7 +383,8 @@ class BackgroundConsciousness:
             state_path = self._drive_root / "state" / "state.json"
             if state_path.exists():
                 state_data = json.loads(read_text(state_path))
-                total_budget = float(os.environ.get("TOTAL_BUDGET", "1"))
+                total_budget_str = os.environ.get("TOTAL_BUDGET", "").strip()
+                total_budget = float(total_budget_str) if total_budget_str else 200.0
                 spent = float(state_data.get("spent_usd", 0))
                 if total_budget > 0:
                     remaining = max(0, total_budget - spent)
@@ -381,8 +412,6 @@ class BackgroundConsciousness:
         # Read-only tools for awareness
         "web_search", "repo_read", "repo_list", "drive_read", "drive_list",
         "chat_history",
-        # GitHub Issues
-        "list_github_issues", "get_github_issue",
     })
 
     def _build_registry(self) -> "ToolRegistry":
