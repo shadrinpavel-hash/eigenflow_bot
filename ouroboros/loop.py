@@ -65,7 +65,7 @@ async def tool_loop(
             )
 
             # Make the LLM call
-            logging.info(f"Calling LLM: {model} task_id={runtime['task']['id']}")
+            logging.info(f"Calling LLM: {model}")
 
             messages_json = json.dumps(messages, indent=2)
 
