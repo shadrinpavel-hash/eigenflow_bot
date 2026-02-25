@@ -60,7 +60,7 @@ class BackgroundConsciousness:
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._wakeup_event = threading.Event()
-        self._next_wakeup_sec: float = 1800.0
+        self._next_wakeup_sec: float = 300.0
         self._observations: queue.Queue = queue.Queue()
         self._deferred_events: list = []
 
@@ -386,13 +386,13 @@ class BackgroundConsciousness:
 
         # Register consciousness-specific tool (modifies self._next_wakeup_sec)
         def _set_next_wakeup(ctx: Any, seconds: int = 300) -> str:
-            self._next_wakeup_sec = max(60, min(86400, int(seconds)))
+            self._next_wakeup_sec = max(60, min(3600, int(seconds)))
             return f"OK: next wakeup in {self._next_wakeup_sec}s"
 
         registry.register(ToolEntry("set_next_wakeup", {
             "name": "set_next_wakeup",
             "description": "Set how many seconds until your next thinking cycle. "
-                           "Default 1800. Range: 60-86400.",
+                           "Default 300. Range: 60-3600.",
             "parameters": {"type": "object", "properties": {
                 "seconds": {"type": "integer",
                             "description": "Seconds until next wakeup (60-3600)"},
