@@ -360,7 +360,7 @@ class BackgroundConsciousness:
             if state_path.exists():
                 state_data = json.loads(read_text(state_path))
                 total_budget_str = os.environ.get("TOTAL_BUDGET", "").strip()
-                total_budget = float(total_budget_str) if total_budget_str else 200.0
+            total_budget = float(total_budget_str) if total_budget_str else 200.0
                 spent = float(state_data.get("spent_usd", 0))
                 if total_budget > 0:
                     remaining = max(0, total_budget - spent)
