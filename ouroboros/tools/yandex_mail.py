@@ -44,19 +44,20 @@ def _load_env_file(path: str) -> dict:
     return result
 
 
-def _get_credentials() -> tuple[str, str]:
-    """Read YANDEX_EMAIL and YANDEX_APP_PASSWORD.
-
-    Tries multiple sources in priority order so the tool works both when
-    called from a forked worker (os.environ inherited from launcher) and
-    from a fresh subprocess that can't use google.colab.userdata directly.
-    """
+def _resolve_credentials() -> tuple[str, str, list[str]]:
+    """Read YANDEX_EMAIL and YANDEX_APP_PASSWORD and return credential sources."""
+    sources: list[str] = []
     email_addr = os.environ.get("YANDEX_EMAIL", "").strip()
     password = os.environ.get("YANDEX_APP_PASSWORD", "").strip()
+
+    if email_addr or password:
+        sources.append("os.environ")
 
     if not email_addr or not password:
         # Fallback 1: /tmp/ouroboros.env — written by colab_launcher.py from Jupyter kernel
         env = _load_env_file("/tmp/ouroboros.env")
+        if (not email_addr and env.get("YANDEX_EMAIL")) or (not password and env.get("YANDEX_APP_PASSWORD")):
+            sources.append("/tmp/ouroboros.env")
         if not email_addr and env.get("YANDEX_EMAIL"):
             email_addr = env["YANDEX_EMAIL"]
             os.environ["YANDEX_EMAIL"] = email_addr
@@ -68,19 +69,33 @@ def _get_credentials() -> tuple[str, str]:
         # Fallback 2: google.colab.userdata (works only inside Jupyter kernel)
         try:
             from google.colab import userdata  # type: ignore
+
+            colab_hit = False
             if not email_addr:
                 v = (userdata.get("YANDEX_EMAIL") or "").strip()
                 if v:
                     email_addr = v
                     os.environ["YANDEX_EMAIL"] = v
+                    colab_hit = True
             if not password:
                 v = (userdata.get("YANDEX_APP_PASSWORD") or "").strip()
                 if v:
                     password = v
                     os.environ["YANDEX_APP_PASSWORD"] = v
+                    colab_hit = True
+            if colab_hit:
+                sources.append("google.colab.userdata")
         except Exception:
             pass
 
+    # Preserve order while removing duplicates
+    unique_sources = list(dict.fromkeys(sources))
+    return email_addr, password, unique_sources
+
+
+def _get_credentials() -> tuple[str, str]:
+    """Read YANDEX_EMAIL and YANDEX_APP_PASSWORD."""
+    email_addr, password, _ = _resolve_credentials()
     return email_addr, password
 
 
@@ -343,16 +358,7 @@ def _yandex_search_mail(
 
 def _yandex_check_credentials(ctx: ToolContext) -> str:
     """Check if Yandex Mail credentials are available and test the IMAP connection."""
-    email_addr, password = _get_credentials()
-
-    # Diagnose what's available and from where
-    sources = []
-    if os.environ.get("YANDEX_EMAIL"):
-        sources.append("os.environ")
-    elif os.path.exists("/tmp/ouroboros.env"):
-        env = _load_env_file("/tmp/ouroboros.env")
-        if env.get("YANDEX_EMAIL"):
-            sources.append("/tmp/ouroboros.env")
+    email_addr, password, sources = _resolve_credentials()
 
     if not email_addr:
         return (
