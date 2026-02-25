@@ -118,6 +118,7 @@ EXPECTED_TOOLS = [
     "yandex_read_inbox",
     "yandex_search_mail",
     "yandex_check_credentials",
+    "yandex_monitor_inbox",
 ]
 
 
