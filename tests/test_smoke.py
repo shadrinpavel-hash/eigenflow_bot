@@ -117,6 +117,7 @@ EXPECTED_TOOLS = [
     # Yandex Mail
     "yandex_read_inbox",
     "yandex_search_mail",
+    "yandex_check_credentials",
 ]
 
 
