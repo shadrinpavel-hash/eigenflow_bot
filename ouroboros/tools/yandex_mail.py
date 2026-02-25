@@ -4,8 +4,10 @@ Tools:
   yandex_read_inbox  — fetch the latest N messages from INBOX
   yandex_search_mail — search by sender, subject, text, date range
 
-Credentials are read from os.environ (YANDEX_EMAIL, YANDEX_APP_PASSWORD).
-Fallback: /tmp/ouroboros.env (session-local file written by launcher).
+Secrets are read from os.environ (set by colab_launcher.py via userdata.get()).
+If the env-vars are absent (e.g. the tool runs in a subprocess that didn't inherit
+them), we try google.colab.userdata as a fallback — it works when the call
+originates from a Jupyter kernel context.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import imaplib
 import os
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
-from typing import List
+from typing import List, Optional
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 
@@ -23,36 +25,53 @@ from ouroboros.tools.registry import ToolContext, ToolEntry
 # Helpers
 # ---------------------------------------------------------------------------
 
-_TMP_ENV_FILE = "/tmp/ouroboros.env"
+def _get_credentials() -> tuple[str, str]:
+    """Read YANDEX_EMAIL and YANDEX_APP_PASSWORD.
 
+    Priority:
+    1. os.environ (set by colab_launcher.py, inherited by fork workers)
+    2. google.colab.userdata (direct Jupyter kernel fallback)
+    3. secrets.env file on Drive (last-resort fallback written by a Colab cell)
+    """
+    email_addr = os.environ.get("YANDEX_EMAIL", "").strip()
+    password = os.environ.get("YANDEX_APP_PASSWORD", "").strip()
 
-def _load_tmp_env() -> dict:
-    """Read KEY=VALUE pairs from /tmp/ouroboros.env (session-local, not on Drive)."""
-    result: dict = {}
-    try:
-        if os.path.exists(_TMP_ENV_FILE):
-            with open(_TMP_ENV_FILE, "r") as f:
+    if not email_addr or not password:
+        # Fallback 1: google.colab.userdata
+        try:
+            from google.colab import userdata  # type: ignore
+            if not email_addr:
+                email_addr = (userdata.get("YANDEX_EMAIL") or "").strip()
+            if not password:
+                password = (userdata.get("YANDEX_APP_PASSWORD") or "").strip()
+            # Cache in env so subsequent calls don't need to re-fetch
+            if email_addr:
+                os.environ["YANDEX_EMAIL"] = email_addr
+            if password:
+                os.environ["YANDEX_APP_PASSWORD"] = password
+        except Exception:
+            pass
+
+    if not email_addr or not password:
+        # Fallback 2: secrets.env file on Drive (set by owner via Colab cell)
+        secrets_path = "/content/drive/MyDrive/Ouroboros/secrets.env"
+        try:
+            with open(secrets_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
-                    if "=" in line and not line.startswith("#"):
-                        k, v = line.split("=", 1)
-                        result[k.strip()] = v.strip()
-    except Exception:
-        pass
-    return result
-
-
-def _get_credentials() -> tuple[str, str]:
-    email_addr = os.environ.get("YANDEX_EMAIL", "")
-    password = os.environ.get("YANDEX_APP_PASSWORD", "")
-
-    # Fallback: read from session-local env file written by launcher
-    if not email_addr or not password:
-        tmp_env = _load_tmp_env()
-        if not email_addr:
-            email_addr = tmp_env.get("YANDEX_EMAIL", "")
-        if not password:
-            password = tmp_env.get("YANDEX_APP_PASSWORD", "")
+                    if "=" not in line or line.startswith("#"):
+                        continue
+                    key, _, val = line.partition("=")
+                    key = key.strip()
+                    val = val.strip()
+                    if key == "YANDEX_EMAIL" and not email_addr:
+                        email_addr = val
+                        os.environ["YANDEX_EMAIL"] = val
+                    elif key == "YANDEX_APP_PASSWORD" and not password:
+                        password = val
+                        os.environ["YANDEX_APP_PASSWORD"] = val
+        except Exception:
+            pass
 
     return email_addr, password
 
@@ -75,7 +94,7 @@ def _decode_str(value) -> str:
 
 
 def _get_body(msg) -> str:
-    """Extract plain text body (first 500 chars)."""
+    """Extract plain text body (first 1000 chars)."""
     body = ""
     if msg.is_multipart():
         for part in msg.walk():
@@ -89,7 +108,7 @@ def _get_body(msg) -> str:
         if payload:
             charset = msg.get_content_charset() or "utf-8"
             body = payload.decode(charset, errors="replace")
-    return body[:500].strip()
+    return body[:1000].strip()
 
 
 def _connect() -> imaplib.IMAP4_SSL:
@@ -97,13 +116,9 @@ def _connect() -> imaplib.IMAP4_SSL:
     email_addr, password = _get_credentials()
     if not email_addr or not password:
         raise RuntimeError(
-            "YANDEX_EMAIL or YANDEX_APP_PASSWORD not set.\n"
-            "Run this once in a Colab cell before starting the agent:\n\n"
-            "  from google.colab import userdata\n"
-            "  with open('/tmp/ouroboros.env', 'w') as f:\n"
-            "      f.write(f\"YANDEX_EMAIL={userdata.get('YANDEX_EMAIL')}\\n\")\n"
-            "      f.write(f\"YANDEX_APP_PASSWORD={userdata.get('YANDEX_APP_PASSWORD')}\\n\")\n"
-            "  print('Done')"
+            "YANDEX_EMAIL or YANDEX_APP_PASSWORD not available. "
+            "Make sure they are added to Colab Secrets with Notebook Access enabled, "
+            "then restart the agent."
         )
     conn = imaplib.IMAP4_SSL("imap.yandex.ru", 993)
     conn.login(email_addr, password)
@@ -139,7 +154,7 @@ def _fetch_messages(conn: imaplib.IMAP4_SSL, uids: list) -> list:
     return results
 
 
-def _format_messages(messages: list, header: str, preview_len: int = 250) -> str:
+def _format_messages(messages: list, header: str, preview_len: int = 300) -> str:
     """Format a list of message dicts into readable text."""
     lines = [header, ""]
     for i, m in enumerate(messages, 1):
@@ -235,10 +250,28 @@ def _yandex_search_mail(
         return _format_messages(
             messages,
             header=f"🔍 Найдено {len(messages)} писем ({criteria_str}):",
-            preview_len=300,
+            preview_len=400,
         )
     except Exception as e:
         return f"Ошибка поиска по почте: {e}"
+
+
+def _yandex_check_credentials(ctx: ToolContext) -> str:
+    """Check if Yandex Mail credentials are available and test the IMAP connection."""
+    email_addr, password = _get_credentials()
+    if not email_addr:
+        return "❌ YANDEX_EMAIL не найден. Добавь в Colab Secrets с включённым Notebook Access."
+    if not password:
+        return f"❌ YANDEX_APP_PASSWORD не найден. Email найден: {email_addr}"
+    try:
+        conn = _connect()
+        conn.select("INBOX")
+        status, data = conn.uid("search", None, "ALL")
+        total = len(data[0].split()) if status == "OK" and data[0] else 0
+        conn.logout()
+        return f"✅ Подключение успешно. Email: {email_addr}. Всего писем в INBOX: {total}."
+    except Exception as e:
+        return f"❌ Ошибка подключения к imap.yandex.ru: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -307,5 +340,22 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=_yandex_search_mail,
             timeout_sec=30,
+        ),
+        ToolEntry(
+            name="yandex_check_credentials",
+            schema={
+                "name": "yandex_check_credentials",
+                "description": (
+                    "Check if Yandex Mail credentials (YANDEX_EMAIL and YANDEX_APP_PASSWORD) "
+                    "are available and test the IMAP connection. Use this to diagnose issues."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            },
+            handler=_yandex_check_credentials,
+            timeout_sec=15,
         ),
     ]
