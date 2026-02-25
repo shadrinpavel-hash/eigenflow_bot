@@ -60,7 +60,7 @@ class BackgroundConsciousness:
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._wakeup_event = threading.Event()
-        self._next_wakeup_sec: float = 3600.0
+        self._next_wakeup_sec: float = 1800.0
         self._observations: queue.Queue = queue.Queue()
         self._deferred_events: list = []
 
@@ -80,14 +80,7 @@ class BackgroundConsciousness:
 
     @property
     def _model(self) -> str:
-        model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
-        # Safety: never use expensive pro models for background consciousness
-        model_lower = model.lower()
-        if ("gemini-3" in model_lower or
-                ("gemini" in model_lower and "pro" in model_lower and "flash" not in model_lower)):
-            log.info("Background model '%s' is expensive, overriding to gemini-2.0-flash-001", model)
-            return "google/gemini-2.0-flash-001"
-        return model
+        return os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
 
     def start(self) -> str:
         if self.is_running:
@@ -160,7 +153,7 @@ class BackgroundConsciousness:
                     "traceback": traceback.format_exc()[:1500],
                 })
                 self._next_wakeup_sec = min(
-                    self._next_wakeup_sec * 2, 7200
+                    self._next_wakeup_sec * 2, 1800
                 )
 
     def _check_budget(self) -> bool:

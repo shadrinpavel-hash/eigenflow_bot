@@ -117,29 +117,7 @@ assert GITHUB_REPO and str(GITHUB_REPO).strip(), "GITHUB_REPO not set. Add it to
 MAX_WORKERS = int(get_cfg("OUROBOROS_MAX_WORKERS", default="5", allow_legacy_secret=True) or "5")
 MODEL_MAIN = get_cfg("OUROBOROS_MODEL", default="anthropic/claude-sonnet-4.6", allow_legacy_secret=True)
 MODEL_CODE = get_cfg("OUROBOROS_MODEL_CODE", default="anthropic/claude-sonnet-4.6", allow_legacy_secret=True)
-_RAW_MODEL_LIGHT = get_cfg("OUROBOROS_MODEL_LIGHT", default=DEFAULT_LIGHT_MODEL, allow_legacy_secret=True)
-
-# Cost guard: if OUROBOROS_MODEL_LIGHT is set to a known expensive model,
-# redirect to a cheap flash variant. Background consciousness runs frequently
-# and must NOT use Pro-tier models.
-_EXPENSIVE_BG_MODELS = {
-    "google/gemini-2.5-pro-preview",
-    "google/gemini-3-pro-preview",
-    "google/gemini-3-pro",
-    "google/gemini-2.0-pro",
-    "anthropic/claude-opus-4",
-    "anthropic/claude-opus-4.5",
-    "anthropic/claude-opus-4.6",
-    "openai/gpt-5",
-    "openai/o3",
-}
-_FLASH_FALLBACK = "google/gemini-2.0-flash-001"
-
-if _RAW_MODEL_LIGHT and str(_RAW_MODEL_LIGHT).strip() in _EXPENSIVE_BG_MODELS:
-    print(f"[cfg] BG cost guard: {_RAW_MODEL_LIGHT!r} -> {_FLASH_FALLBACK!r} (expensive model blocked for background tasks)")
-    MODEL_LIGHT = _FLASH_FALLBACK
-else:
-    MODEL_LIGHT = _RAW_MODEL_LIGHT
+MODEL_LIGHT = get_cfg("OUROBOROS_MODEL_LIGHT", default=DEFAULT_LIGHT_MODEL, allow_legacy_secret=True)
 
 BUDGET_REPORT_EVERY_MESSAGES = 10
 SOFT_TIMEOUT_SEC = max(60, int(get_cfg("OUROBOROS_SOFT_TIMEOUT_SEC", default="600", allow_legacy_secret=True) or "600"))
