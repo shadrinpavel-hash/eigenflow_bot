@@ -23,10 +23,20 @@ MODEL_PRICING = {
     "mistralai/mistral-small-latest": {"input": 0.0007, "output": 0.0021},
     "google/gemini-2.0-pro-004": {"input": 0.002, "output": 0.006},
     "google/gemini-2.0-flash-001": {"input": 0.00025, "output": 0.00075},
+    "google/gemini-2.5-flash-lite": {"input": 0.0001, "output": 0.0004},
     "openai/gpt-4o-mini": {"input": 0.00025, "output": 0.00075},
 }
 
 MAX_ROUNDS = 30
+
+
+def _calc_cost(tokens: int, model: str, token_type: str) -> float:
+    """Calculate cost for given tokens. token_type: 'input' or 'output'."""
+    pricing = MODEL_PRICING.get(model)
+    if not pricing:
+        logging.warning(f"Model {model} not found in MODEL_PRICING")
+        return 0.0
+    return (tokens / 1000) * pricing[token_type]
 
 
 async def tool_loop(
@@ -39,111 +49,52 @@ async def tool_loop(
 ) -> Dict[str, Any]:
     logging.info(f"Starting tool loop with model={model}")
 
-    # Model Fallback
-    if model in ("google/gemini-2.0-flash-001", "google/gemini-2.5-flash-lite"):
-        fallback_model = "openai/gpt-4o-mini"
-    else:
-        fallback_model = model
+    fallback_model = "openai/gpt-4o-mini" if model in (
+        "google/gemini-2.0-flash-001", "google/gemini-2.5-flash-lite"
+    ) else model
 
-    # Initialize variables for tracking cost and rounds
     round_number = 0
-    total_cost = 0
+    total_cost = 0.0
     results: list[dict] = []
     interrupted = False
-    tool_calls_this_round = 0
     session = aiohttp.ClientSession()
 
     while round_number < max_rounds:
         round_number += 1
         logging.info(f"--- Round {round_number} ---")
-        tool_calls_this_round = 0
 
         try:
-            # Build context
             messages = llm.prepare_messages(
                 prompt, tools=tools, model=model, chat_history=chat_history
             )
-
-            # Make the LLM call
-            logging.info(f"Calling LLM: {model} task_id={runtime['task']['id']}")
-
             messages_json = json.dumps(messages, indent=2)
-
-            # Calculate prompt tokens cost
             input_tokens = llm.count_tokens(messages_json, model)
+            input_cost = _calc_cost(input_tokens, model, "input")
 
-            if model in MODEL_PRICING:
-                input_cost = (input_tokens / 1000) * MODEL_PRICING[model]["input"]
-            else:
-                input_cost = 0
-                logging.warning(f"Model {model} not found in MODEL_PRICING")
-
-            # Early budget check
             if total_cost + input_cost > available_budget:
-                logging.warning(
-                    f"Budget exceeded: cost={total_cost + input_cost} budget={available_budget}"
-                )
-                break  # Exit the loop if the budget is exceeded
+                logging.warning(f"Budget exceeded: cost={total_cost + input_cost:.4f}")
+                break
 
             try:
                 response = await llm.call_llm(messages=messages, model=model, session=session)
             except ValueError as e:
                 if model != fallback_model:
                     logging.warning(f"Fallback: {model} -> {fallback_model} after {e}")
-                    logging.warning(f"Original model call failed with ValueError: {e}")
-                    logging.info(f"Calling LLM: {fallback_model}")
                     response = await llm.call_llm(messages=messages, model=fallback_model, session=session)
-
-                    # Calculate prompt tokens cost
-                    input_tokens = llm.count_tokens(messages_json, fallback_model)
-
-                    if fallback_model in MODEL_PRICING:
-                        input_cost = (input_tokens / 1000) * MODEL_PRICING[fallback_model]["input"]
-                    else:
-                        input_cost = 0
-                        logging.warning(f"Model {fallback_model} not found in MODEL_PRICING")
-
+                    input_cost = _calc_cost(llm.count_tokens(messages_json, fallback_model), fallback_model, "input")
                 else:
-                    logging.error(f"Fallback failed: both {model} and {fallback_model} failed with ValueError: {e}")
                     raise
 
-            # Log response content
-            logging.info(f"LLM Response: {response}")
-
-            # Calculate completion tokens cost
             if not response or "content" not in response:
-                logging.warning(f"Empty response from model {model}")
-                logging.warning(f"Fallback: {model} -> {fallback_model} after empty response")
+                logging.warning(f"Empty response, trying fallback {fallback_model}")
                 if model != fallback_model:
                     response = await llm.call_llm(messages=messages, model=fallback_model, session=session)
-                    # Calculate prompt tokens cost
-                    input_tokens = llm.count_tokens(messages_json, fallback_model)
-
-                    if fallback_model in MODEL_PRICING:
-                        input_cost = (input_tokens / 1000) * MODEL_PRICING[fallback_model]["input"]
-                    else:
-                        input_cost = 0
-                        logging.warning(f"Model {fallback_model} not found in MODEL_PRICING")
-
-
-
+                    input_cost = _calc_cost(llm.count_tokens(messages_json, fallback_model), fallback_model, "input")
                 else:
-                    logging.error(f"Fallback failed: both {model} and {fallback_model} returned empty response")
-                    raise ValueError(f"Both models {model} and {fallback_model} returned empty responses")
-                    
+                    raise ValueError(f"Both {model} and {fallback_model} returned empty responses")
 
-            if "content" in response:
-                completion_tokens = llm.count_tokens(response["content"], model)
-            else:
-                completion_tokens = 0
-
-            if model in MODEL_PRICING:
-                completion_cost = (completion_tokens / 1000) * MODEL_PRICING[model]["output"]
-            else:
-                completion_cost = 0
-            # Track the total cost
-            total_cost += input_cost + completion_cost
-
+            completion_tokens = llm.count_tokens(response.get("content", ""), model)
+            total_cost += input_cost + _calc_cost(completion_tokens, model, "output")
 
         except CancelledError:
             logging.info("Task was cancelled")
@@ -151,83 +102,44 @@ async def tool_loop(
             break
 
         if not response or "content" not in response:
-            logging.warning(f"No content. Stopping tool loop.")
             break
 
-        # Parse tool calls
         tool_calls = response.get("tool_calls", [])
-        tool_calls_this_round += len(tool_calls)
-
-        if tool_calls_this_round > 5:
+        if len(tool_calls) > 5:
             logging.warning("Too many tool calls in one round. Exiting.")
             break
 
-        # Execute tool calls
         tool_results = []
         for tool_call in tool_calls:
             tool_name = tool_call["name"]
             arguments = tool_call.get("arguments", {})
-
-            logging.info(f"Tool call: {tool_name}({arguments})")
             tool = next((t for t in tools if t["name"] == tool_name), None)
 
             if not tool:
-                error = f"Tool {tool_name} not found"
-                logging.error(error)
-                tool_results.append({"tool_call_id": tool_call["id"], "error": error})
+                tool_results.append({"tool_call_id": tool_call["id"], "error": f"Tool {tool_name} not found"})
                 continue
 
             try:
-                # Execute the tool
-                tool_start_time = time.time()
+                t0 = time.time()
                 tool_output = await tool["function"](**arguments)
-                tool_duration = time.time() - tool_start_time
-                logging.info(f"Tool {tool_name} duration: {tool_duration:.3f}s")
-
-                # Convert tool_output to string if it is not a string already
+                logging.info(f"Tool {tool_name} done in {time.time()-t0:.3f}s")
                 if not isinstance(tool_output, str):
                     tool_output = json.dumps(tool_output, indent=2)
-
-                tool_results.append(
-                    {
-                        "tool_call_id": tool_call["id"],
-                        "result": tool_output,
-                    }
-                )
-                logging.info(f"Tool {tool_name} result: {tool_output}")
-
+                tool_results.append({"tool_call_id": tool_call["id"], "result": tool_output})
             except Exception as e:
-                error = f"Tool {tool_name} raised an exception: {e}"
-                logging.exception(error)
-                tool_results.append({"tool_call_id": tool_call["id"], "error": error})
+                logging.exception(f"Tool {tool_name} error")
+                tool_results.append({"tool_call_id": tool_call["id"], "error": str(e)})
 
-        # Append the results to the overall results
-        results.append(
-            {
-                "role": "assistant",
-                "content": response["content"],
-                "tool_calls": tool_calls,
-            }
-        )
+        results.append({"role": "assistant", "content": response["content"], "tool_calls": tool_calls})
+        results.append({"role": "tool", "content": json.dumps(tool_results)})
 
-        results.append({
-            "role": "tool",
-            "content": json.dumps(tool_results)
-        })
-
-        logging.info(f"--- Round {round_number} complete ---")
-
-        # Check if the tool loop should stop
         if not tool_calls:
-            logging.info("No tool calls. Stopping tool loop.")
             break
 
     await session.close()
     logging.info(f"Finished tool loop after {round_number} rounds")
+    return {"interrupted": interrupted, "cost": total_cost, "rounds": round_number, "results": results}
 
-    return {
-        "interrupted": interrupted,
-        "cost": total_cost,
-        "rounds": round_number,
-        "results": results,
-    }
+
+# Compatibility alias expected by agent.py
+run_llm_loop = tool_loop
