@@ -110,6 +110,8 @@ except Exception as e:
 
 OPENAI_API_KEY = get_secret("OPENAI_API_KEY", default="")
 ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY", default="")
+YANDEX_EMAIL = get_secret("YANDEX_EMAIL", default="")
+YANDEX_APP_PASSWORD = get_secret("YANDEX_APP_PASSWORD", default="")
 GITHUB_USER = get_cfg("GITHUB_USER", default=None, allow_legacy_secret=True)
 GITHUB_REPO = get_cfg("GITHUB_REPO", default=None, allow_legacy_secret=True)
 assert GITHUB_USER and str(GITHUB_USER).strip(), "GITHUB_USER not set. Add it to your config cell (see README)."
@@ -145,6 +147,10 @@ if MODEL_LIGHT:
 os.environ["OUROBOROS_DIAG_HEARTBEAT_SEC"] = str(DIAG_HEARTBEAT_SEC)
 os.environ["OUROBOROS_DIAG_SLOW_CYCLE_SEC"] = str(DIAG_SLOW_CYCLE_SEC)
 os.environ["TELEGRAM_BOT_TOKEN"] = str(TELEGRAM_BOT_TOKEN)
+if YANDEX_EMAIL:
+    os.environ["YANDEX_EMAIL"] = str(YANDEX_EMAIL)
+if YANDEX_APP_PASSWORD:
+    os.environ["YANDEX_APP_PASSWORD"] = str(YANDEX_APP_PASSWORD)
 
 if str(ANTHROPIC_API_KEY or "").strip():
     ensure_claude_code_cli()
