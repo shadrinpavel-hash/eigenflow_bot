@@ -40,7 +40,7 @@ async def tool_loop(
     logging.info(f"Starting tool loop with model={model}")
 
     # Model Fallback
-    if model in ("google/gemini-2.0-flash-001", "google/gemini-2.5-flash-lite"):
+    if model == "google/gemini-2.0-flash-001":
         fallback_model = "openai/gpt-4o-mini"
     else:
         fallback_model = model
