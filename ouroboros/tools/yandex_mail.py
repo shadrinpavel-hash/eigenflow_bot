@@ -53,7 +53,30 @@ def _get_credentials() -> tuple[str, str]:
             pass
 
     if not email_addr or not password:
-        # Fallback 2: secrets.env file on Drive (set by owner via Colab cell)
+        # Fallback 2: /tmp/ouroboros.env (written by colab_launcher.py from Jupyter kernel)
+        for _env_path in ["/tmp/ouroboros.env", "/content/drive/MyDrive/Ouroboros/secrets.env"]:
+            if email_addr and password:
+                break
+            try:
+                with open(_env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if "=" not in line or line.startswith("#"):
+                            continue
+                        key, _, val = line.partition("=")
+                        key = key.strip()
+                        val = val.strip()
+                        if key == "YANDEX_EMAIL" and not email_addr:
+                            email_addr = val
+                            os.environ["YANDEX_EMAIL"] = val
+                        elif key == "YANDEX_APP_PASSWORD" and not password:
+                            password = val
+                            os.environ["YANDEX_APP_PASSWORD"] = val
+            except Exception:
+                pass
+
+    if False:  # dead code placeholder - original fallback 2 below is now merged above
+        # Fallback 3: secrets.env file on Drive (set by owner via Colab cell)
         secrets_path = "/content/drive/MyDrive/Ouroboros/secrets.env"
         try:
             with open(secrets_path, "r", encoding="utf-8") as f:
