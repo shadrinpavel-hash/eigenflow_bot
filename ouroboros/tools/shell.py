@@ -17,22 +17,6 @@ from ouroboros.utils import utc_now_iso, run_cmd, append_jsonl, truncate_for_log
 log = logging.getLogger(__name__)
 
 
-def _resolve_work_dir(ctx: ToolContext, cwd: str) -> pathlib.Path:
-    """Resolve working directory for shell commands.
-
-    - Empty / '.' / './' → ctx.repo_dir (own repo, default)
-    - Absolute path (starts with '/') → use directly (external repo)
-    - Relative path → resolve relative to ctx.repo_dir (sub-directory)
-    """
-    if not cwd or cwd.strip() in ("", ".", "./"):
-        return ctx.repo_dir
-    p = pathlib.Path(cwd)
-    if p.is_absolute():
-        return p
-    candidate = (ctx.repo_dir / cwd).resolve()
-    return candidate
-
-
 def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
     # Recover from LLM sending cmd as JSON string instead of list
     if isinstance(cmd, str):
@@ -78,7 +62,11 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
         return "⚠️ SHELL_ARG_ERROR: cmd must be a list of strings."
     cmd = [str(x) for x in cmd]
 
-    work_dir = _resolve_work_dir(ctx, cwd)
+    work_dir = ctx.repo_dir
+    if cwd and cwd.strip() not in ("", ".", "./"):
+        candidate = (ctx.repo_dir / cwd).resolve()
+        if candidate.exists() and candidate.is_dir():
+            work_dir = candidate
 
     try:
         res = subprocess.run(
@@ -182,22 +170,18 @@ def _parse_claude_output(stdout: str, ctx: ToolContext) -> str:
 
 
 def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
-    """Delegate code edits to Claude Code CLI.
-
-    cwd: working directory for edits.
-         - Empty / '.' → own repo (default behavior)
-         - Absolute path (e.g. '/content/olumina_repo') → external repo
-         - Relative path → sub-directory of own repo
-    """
+    """Delegate code edits to Claude Code CLI."""
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return "⚠️ ANTHROPIC_API_KEY not set, claude_code_edit unavailable."
 
-    work_dir_path = _resolve_work_dir(ctx, cwd)
-    work_dir = str(work_dir_path)
-    is_external = work_dir_path != ctx.repo_dir
+    work_dir = str(ctx.repo_dir)
+    if cwd and cwd.strip() not in ("", ".", "./"):
+        candidate = (ctx.repo_dir / cwd).resolve()
+        if candidate.exists():
+            work_dir = str(candidate)
 
     claude_bin = shutil.which("claude")
     if not claude_bin:
@@ -205,20 +189,16 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
 
     ctx.emit_progress_fn("Delegating to Claude Code CLI...")
 
-    # Only lock + checkout own repo; external repos are self-contained
-    lock = None
-    if not is_external:
-        lock = _acquire_git_lock(ctx)
+    lock = _acquire_git_lock(ctx)
+    try:
         try:
             run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
         except Exception as e:
-            _release_git_lock(lock)
             return f"⚠️ GIT_ERROR (checkout): {e}"
 
-    try:
         full_prompt = (
             f"STRICT: Only modify files inside {work_dir}. "
-            f"{'External repo — do NOT commit or push.' if is_external else f'Git branch: {ctx.branch_dev}. Do NOT commit or push.'}\n\n"
+            f"Git branch: {ctx.branch_dev}. Do NOT commit or push.\n\n"
             f"{prompt}"
         )
 
@@ -243,8 +223,8 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
         if not stdout:
             stdout = "OK: Claude Code completed with empty output."
 
-        # Check for uncommitted changes
-        warning = _check_uncommitted_changes(work_dir_path)
+        # Check for uncommitted changes and append warning BEFORE finally block
+        warning = _check_uncommitted_changes(ctx.repo_dir)
         if warning:
             stdout += warning
 
@@ -253,8 +233,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
     except Exception as e:
         return f"⚠️ CLAUDE_CODE_FAILED: {type(e).__name__}: {e}"
     finally:
-        if lock is not None:
-            _release_git_lock(lock)
+        _release_git_lock(lock)
 
     # Parse JSON output and account cost
     return _parse_claude_output(stdout, ctx)
@@ -267,8 +246,7 @@ def get_tools() -> List[ToolEntry]:
             "description": "Run a shell command (list of args) inside the repo. Returns stdout+stderr.",
             "parameters": {"type": "object", "properties": {
                 "cmd": {"type": "array", "items": {"type": "string"}},
-                "cwd": {"type": "string", "default": "",
-                        "description": "Working directory. Empty = own repo. Absolute path = external repo. Relative = sub-dir of own repo."},
+                "cwd": {"type": "string", "default": ""},
             }, "required": ["cmd"]},
         }, _run_shell, is_code_tool=True),
         ToolEntry("claude_code_edit", {
@@ -276,8 +254,7 @@ def get_tools() -> List[ToolEntry]:
             "description": "Delegate code edits to Claude Code CLI. Preferred for multi-file changes and refactors. Follow with repo_commit_push.",
             "parameters": {"type": "object", "properties": {
                 "prompt": {"type": "string"},
-                "cwd": {"type": "string", "default": "",
-                        "description": "Working directory. Empty = own repo. Absolute path (e.g. '/content/olumina_repo') = external repo. Relative = sub-dir of own repo."},
+                "cwd": {"type": "string", "default": ""},
             }, "required": ["prompt"]},
         }, _claude_code_edit, is_code_tool=True, timeout_sec=300),
     ]
